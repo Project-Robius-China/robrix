@@ -32,7 +32,7 @@ use crate::{
     },
     room::{BasicRoomDetails, room_input_bar::RoomInputBarState, typing_notice::TypingNoticeWidgetExt},
     shared::{
-        avatar::{AvatarState, AvatarWidgetRefExt}, callout_tooltip::{CalloutTooltipOptions, TooltipAction, TooltipPosition}, confirmation_modal::ConfirmationModalContent, html_or_plaintext::{HtmlOrPlaintextRef, HtmlOrPlaintextWidgetRefExt, RobrixHtmlLinkAction}, image_viewer::{ImageViewerAction, ImageViewerMetaData, LoadState}, jump_to_bottom_button::{JumpToBottomButtonWidgetExt, UnreadMessageCount}, popup_list::{PopupKind, enqueue_popup_notification}, restore_status_view::RestoreStatusViewWidgetExt, styles::*, text_or_image::{TextOrImageAction, TextOrImageRef, TextOrImageWidgetRefExt}, timestamp::TimestampWidgetRefExt
+        avatar::{AvatarState, AvatarWidgetRefExt}, callout_tooltip::{CalloutTooltipOptions, TooltipAction, TooltipPosition}, confirmation_modal::ConfirmationModalContent, html_or_plaintext::{HtmlOrPlaintextRef, HtmlOrPlaintextWidgetRefExt, RobrixHtmlLinkAction}, image_viewer::{ImageViewerAction, ImageViewerMetaData, LoadState}, jump_to_bottom_button::{JumpToBottomButtonWidgetExt, UnreadMessageCount}, no_longer_member_view::{NoLongerMemberReason, NoLongerMemberViewWidgetExt}, popup_list::{PopupKind, enqueue_popup_notification}, restore_status_view::RestoreStatusViewWidgetExt, styles::*, text_or_image::{TextOrImageAction, TextOrImageRef, TextOrImageWidgetRefExt}, timestamp::TimestampWidgetRefExt
     },
     sliding_sync::{BackwardsPaginateUntilEventRequest, MatrixRequest, PaginationDirection, TimelineEndpoints, TimelineKind, TimelineRequestSender, UserPowerLevels, get_client, submit_async_request, take_timeline_endpoints}, utils::{self, ImageFormat, MEDIA_THUMBNAIL_FORMAT, RoomNameId, unix_time_millis_to_datetime}
 };
@@ -86,6 +86,7 @@ live_design! {
     use crate::home::room_read_receipt::*;
     use crate::rooms_list::*;
     use crate::shared::restore_status_view::*;
+    use crate::shared::no_longer_member_view::NoLongerMemberView;
     use crate::home::link_preview::LinkPreview;
     use link::tsp_link::TspSignIndicator;
 
@@ -609,6 +610,9 @@ live_design! {
             // to finish loading, e.g., when loading an older replied-to message.
             loading_pane = <LoadingPane> { }
 
+            // A view shown when the user is no longer a member of this room
+            // (left, kicked, or banned).
+            no_longer_member_view = <NoLongerMemberView> { }
 
             /*
              * TODO: add the action bar back in as a series of floating buttons.
@@ -832,6 +836,17 @@ impl Widget for RoomScreen {
                     }
                 }
 
+                // Handle when the user is no longer a member of the currently displayed room.
+                if let Some(RoomsListAction::RoomRemoved { room_id, new_state }) = action.downcast_ref() {
+                    // Only handle if this is for the current room.
+                    if self.room_name_id.as_ref().is_some_and(|rn| rn.room_id() == room_id) {
+                        if let Some(reason) = NoLongerMemberReason::from_room_state(new_state.clone()) {
+                            let no_longer_member_view = self.no_longer_member_view(ids!(no_longer_member_view));
+                            no_longer_member_view.show(cx, reason);
+                        }
+                    }
+                }
+
                 // Handle the highlight animation for a message.
                 let Some(tl) = self.tl_state.as_mut() else { continue };
                 if let MessageHighlightAnimationState::Pending { item_id } = tl.message_highlight_animation_state {
@@ -845,6 +860,24 @@ impl Widget for RoomScreen {
                         // Adjust the scrolled-to item's position to be slightly beneath the top of the viewport.
                         // portal_list.set_first_id_and_scroll(portal_list.first_id(), 15.0);
                     }
+                }
+            }
+
+            // Handle actions from the NoLongerMemberView buttons.
+            let no_longer_member_view = self.no_longer_member_view(ids!(no_longer_member_view));
+            if no_longer_member_view.close_clicked(actions) {
+                no_longer_member_view.hide(cx);
+            }
+            if no_longer_member_view.rejoin_clicked(actions) {
+                if let Some(room_name_id) = self.room_name_id.as_ref() {
+                    let room_id = room_name_id.room_id().to_owned();
+                    submit_async_request(MatrixRequest::JoinRoom { room_id });
+                    no_longer_member_view.hide(cx);
+                    enqueue_popup_notification(
+                        "Attempting to rejoin room...",
+                        PopupKind::Info,
+                        Some(3.0),
+                    );
                 }
             }
 
@@ -2236,8 +2269,11 @@ impl RoomScreen {
                     return;
                 }
                 if !self.is_loaded && self.all_rooms_loaded {
-                    panic!("BUG: timeline {kind} is not loaded, but its RoomScreen \
-                    was not waiting for its timeline to be loaded either.");
+                    // All rooms have been loaded from the homeserver, but this room's
+                    // timeline is not available. This means the user is no longer a member
+                    // of this room (left, kicked, or banned). The `restore_status_view`
+                    // will display an appropriate message to the user.
+                    log!("Timeline {kind} is not available - user may no longer be a member of this room.");
                 }
                 return;
             };

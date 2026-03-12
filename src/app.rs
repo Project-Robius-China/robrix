@@ -650,6 +650,40 @@ fn clear_all_app_state(cx: &mut Cx) {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Handle app lifecycle events (Issue #458)
+        match event {
+            Event::Pause => {
+                log!("App lifecycle: Pause - saving state");
+                // Save temporary app state when paused
+                if let Some(user_id) = current_user_id() {
+                    let app_state = self.app_state.clone();
+                    if let Err(e) = persistence::save_app_state(app_state, user_id) {
+                        error!("Failed to save app state on pause. Error: {e}");
+                    }
+                }
+            }
+            Event::Resume => {
+                log!("App lifecycle: Resume - app is now active");
+                // App is now actively receiving input
+                // Could trigger a sync refresh here if needed
+            }
+            Event::Background => {
+                log!("App lifecycle: Background - app is no longer visible");
+                // App is hidden, stop intensive operations
+                // Save window state in case app is killed
+                let window_ref = self.ui.window(ids!(main_window));
+                if let Err(e) = persistence::save_window_state(window_ref, cx) {
+                    error!("Failed to save window state on background. Error: {e}");
+                }
+            }
+            Event::Foreground => {
+                log!("App lifecycle: Foreground - app is now visible");
+                // App is visible again, resume operations
+                // Could trigger UI refresh here if needed
+            }
+            _ => {}
+        }
+
         if let Event::Shutdown = event {
             let window_ref = self.ui.window(ids!(main_window));
             if let Err(e) = persistence::save_window_state(window_ref, cx) {

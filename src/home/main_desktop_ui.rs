@@ -499,6 +499,8 @@ impl WidgetMatchEvent for MainDesktopUI {
                     self.replace_invite_with_joined_room(cx, scope, room_name_id);
                 }
                 RoomsListAction::OpenRoomContextMenu { .. } => {}
+                // RoomRemoved is handled by the RoomScreen itself, which shows the NoLongerMemberView.
+                RoomsListAction::RoomRemoved { .. } => {}
                 RoomsListAction::None => { }
             }
 

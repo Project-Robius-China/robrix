@@ -257,6 +257,14 @@ pub enum RoomsListAction {
         details: RoomContextMenuDetails,
         pos: DVec2,
     },
+    /// A room was removed from the rooms list because the user is no longer a member.
+    ///
+    /// This is emitted when the user leaves, is kicked, or is banned from a room.
+    /// The `RoomScreen` should show the `NoLongerMemberView` if this room is currently displayed.
+    RoomRemoved {
+        room_id: OwnedRoomId,
+        new_state: RoomState,
+    },
     None,
 }
 
@@ -686,10 +694,16 @@ impl RoomsList {
                     }
                 }
                 RoomsListUpdate::RemoveRoom { room_id, new_state } => {
-                    // TODO: once we have a dedicated LoadingScreen widget, we should emit an action
-                    // to replace this room (if it's currently open) with the LoadingScreen widget,
-                    // which should show whether it has been left, kicked, or banned,
-                    // and then options/buttons for the user to re-join it if desired.
+                    // Emit an action so the RoomScreen can show the NoLongerMemberView
+                    // if this room is currently being displayed.
+                    cx.widget_action(
+                        self.widget_uid(),
+                        &scope.path,
+                        RoomsListAction::RoomRemoved {
+                            room_id: room_id.clone(),
+                            new_state: new_state.clone(),
+                        }
+                    );
 
                     if let Some(removed) = self.all_joined_rooms.remove(&room_id) {
                         log!("Removed room {room_id} from the list of all joined rooms, now has state {new_state:?}");

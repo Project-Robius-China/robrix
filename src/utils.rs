@@ -973,6 +973,16 @@ pub fn avatar_from_room_name(room_name: Option<&str>) -> FetchedRoomAvatar {
 }
 
 
+/// Returns `true` if the current platform is primarily touch-based (e.g., Android, iOS).
+///
+/// This is useful for adapting UI behavior like showing buttons by default
+/// instead of requiring hover interactions.
+#[inline]
+pub const fn is_touch_primary_platform() -> bool {
+    cfg!(any(target_os = "android", target_os = "ios"))
+}
+
+
 #[cfg(test)]
 mod tests_room_name {
     use super::*;

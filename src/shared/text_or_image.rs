@@ -13,6 +13,10 @@ live_design! {
     use crate::shared::styles::*;
     DEFAULT_IMAGE = dep("crate://self/resources/img/default_image.png")
 
+    // Maximum height for image thumbnails in the timeline (Issue #650)
+    // This prevents very tall images from dominating the view
+    IMAGE_THUMBNAIL_MAX_HEIGHT = 300.0
+
     pub TextOrImage = {{TextOrImage}} {
         width: Fill, height: Fit,
         flow: Overlay,
@@ -36,18 +40,18 @@ live_design! {
         image_view = <View> {
             visible: false,
             cursor: Default, // Use `Hand` once we support clicking on the image
-            width: Fill, height: Fit,
+            width: Fill, height: Fit { max: (IMAGE_THUMBNAIL_MAX_HEIGHT) },
             image = <Image> {
-                width: Fill, height: Fit,
+                width: Fill, height: Fit { max: (IMAGE_THUMBNAIL_MAX_HEIGHT) },
                 fit: Smallest,
             }
         }
         default_image_view = <View> {
             visible: false,
             cursor: Default, // Use `Hand` once we support clicking on the image
-            width: Fill, height: Fit,
+            width: Fill, height: Fit { max: (IMAGE_THUMBNAIL_MAX_HEIGHT) },
             image = <Image> {
-                width: Fill, height: Fit,
+                width: Fill, height: Fit { max: (IMAGE_THUMBNAIL_MAX_HEIGHT) },
                 fit: Smallest,
                 source: (DEFAULT_IMAGE)
             }

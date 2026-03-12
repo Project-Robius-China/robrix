@@ -27,7 +27,7 @@ use crate::{
     room::BasicRoomDetails,
     shared::avatar::{AvatarWidgetExt, AvatarWidgetRefExt},
     space_service_sync::{SpaceRequest, SpaceRoomExt, SpaceRoomListAction},
-    utils::{self, RoomNameId},
+    utils::{self, is_touch_primary_platform, RoomNameId},
 };
 
 
@@ -1024,17 +1024,19 @@ impl Widget for SpaceLobbyScreen {
                             let show_join_button = !matches!(info.state, Some(RoomState::Joined));
                             let show_leave_button = !show_join_button;
                             let show_view_button = show_leave_button && !info.is_space();
+                            // On touch platforms, always show buttons (no hover available)
+                            let always_show_buttons = is_touch_primary_platform();
                             let item = if info.is_space() {
                                 let item = list.item(cx, item_id, id!(subspace_entry));
-                                let mut show_buttons_view = false;
+                                let mut show_buttons_view = always_show_buttons;
                                 if let Some(mut inner) = item.borrow_mut::<SubspaceEntry>() {
                                     let id_changed = inner.room_id.as_ref() != Some(&info.id);
                                     inner.room_id = Some(info.id.clone());
                                     inner.is_space = true;
                                     if id_changed {
-                                        inner.show_buttons_view = false;
+                                        inner.show_buttons_view = always_show_buttons;
                                     }
-                                    show_buttons_view = inner.show_buttons_view;
+                                    show_buttons_view = inner.show_buttons_view || always_show_buttons;
                                 }
                                 item.view(ids!(buttons_view)).set_visible(cx, show_buttons_view);
                                 // Expand icon
@@ -1046,15 +1048,15 @@ impl Widget for SpaceLobbyScreen {
                                 item
                             } else {
                                 let item = list.item(cx, item_id, id!(room_entry));
-                                let mut show_buttons_view = false;
+                                let mut show_buttons_view = always_show_buttons;
                                 if let Some(mut inner) = item.borrow_mut::<SubspaceEntry>() {
                                     let id_changed = inner.room_id.as_ref() != Some(&info.id);
                                     inner.room_id = Some(info.id.clone());
                                     inner.is_space = false;
                                     if id_changed {
-                                        inner.show_buttons_view = false;
+                                        inner.show_buttons_view = always_show_buttons;
                                     }
-                                    show_buttons_view = inner.show_buttons_view;
+                                    show_buttons_view = inner.show_buttons_view || always_show_buttons;
                                 }
                                 item.view(ids!(buttons_view)).set_visible(cx, show_buttons_view);
                                 item

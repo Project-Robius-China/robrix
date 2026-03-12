@@ -9,6 +9,7 @@ pub mod html_or_plaintext;
 pub mod icon_button;
 pub mod jump_to_bottom_button;
 pub mod mentionable_text_input;
+pub mod no_longer_member_view;
 pub mod popup_list;
 pub mod room_filter_input_bar;
 pub mod styles;
@@ -42,4 +43,5 @@ pub fn live_design(cx: &mut Cx) {
     restore_status_view::live_design(cx);
     confirmation_modal::live_design(cx);
     image_viewer::live_design(cx);
+    no_longer_member_view::live_design(cx);
 }
