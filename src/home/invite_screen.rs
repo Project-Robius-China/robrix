@@ -5,6 +5,7 @@
 //! with buttons to accept or decline the invitation.
 
 use std::ops::Deref;
+use chrono::{DateTime, Local};
 use makepad_widgets::*;
 use matrix_sdk::ruma::OwnedRoomId;
 
@@ -138,6 +139,23 @@ live_design! {
                     wrap: Word,
                 }
             }
+
+            // Invite timestamp - shows when the invite was received
+            invite_timestamp = <Label> {
+                visible: false,
+                width: Fill, height: Fit,
+                align: {x: 0.5, y: 0},
+                margin: {top: 5},
+                flow: RightWrap,
+                text: ""
+                draw_text: {
+                    text_style: <REGULAR_TEXT>{
+                        font_size: 11,
+                    },
+                    color: #666
+                    wrap: Word,
+                }
+            }
         }
 
         buttons = <View> {
@@ -211,6 +229,8 @@ live_design! {
 pub struct InviteDetails {
     pub room_info: BasicRoomDetails,
     pub inviter: Option<InviterInfo>,
+    /// The timestamp when the invite was received, if available.
+    pub invite_timestamp: Option<DateTime<Local>>,
 }
 impl Deref for InviteDetails {
     type Target = BasicRoomDetails;
@@ -470,6 +490,16 @@ impl Widget for InviteScreen {
         let invite_room_label = info.room_name_id().to_string();
         room_view.label(ids!(room_name)).set_text(cx, &invite_room_label);
 
+        // Display the invite timestamp if available.
+        let invite_timestamp_label = room_view.label(ids!(invite_timestamp));
+        if let Some(timestamp) = &info.invite_timestamp {
+            let formatted_time = timestamp.format("%B %d, %Y at %I:%M %p").to_string();
+            invite_timestamp_label.set_text(cx, &format!("Invited {}", formatted_time));
+            invite_timestamp_label.set_visible(cx, true);
+        } else {
+            invite_timestamp_label.set_visible(cx, false);
+        }
+
         // Third, set the buttons' text based on the invite state.
         let cancel_button = self.view.button(ids!(cancel_button));
         let accept_button = self.view.button(ids!(accept_button));
@@ -520,12 +550,17 @@ impl InviteScreen {
             .borrow()
             .get(room_name_id.room_id())
         {
+            // Extract the invite timestamp from the latest message timestamp if available.
+            let invite_timestamp = invite.latest.as_ref()
+                .and_then(|(ts, _)| utils::unix_time_millis_to_datetime(*ts));
+
             self.info = Some(InviteDetails {
                 room_info: BasicRoomDetails::NameAndAvatar {
                     room_name_id: room_name_id.clone(),
                     room_avatar: invite.room_avatar.clone(),
                 },
                 inviter: invite.inviter_info.clone(),
+                invite_timestamp,
             });
             self.invite_state = invite.invite_state;
             self.has_shown_confirmation = false;

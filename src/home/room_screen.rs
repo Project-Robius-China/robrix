@@ -30,7 +30,7 @@ use crate::{
         user_profile::{ShowUserProfileAction, UserProfile, UserProfileAndRoomId, UserProfilePaneInfo, UserProfileSlidingPaneRef, UserProfileSlidingPaneWidgetExt},
         user_profile_cache,
     },
-    room::{BasicRoomDetails, room_input_bar::RoomInputBarState, typing_notice::TypingNoticeWidgetExt},
+    room::{BasicRoomDetails, reply_preview::RepliedToMessageWidgetRefExt, room_input_bar::RoomInputBarState, typing_notice::TypingNoticeWidgetExt},
     shared::{
         avatar::{AvatarState, AvatarWidgetRefExt}, callout_tooltip::{CalloutTooltipOptions, TooltipAction, TooltipPosition}, confirmation_modal::ConfirmationModalContent, html_or_plaintext::{HtmlOrPlaintextRef, HtmlOrPlaintextWidgetRefExt, RobrixHtmlLinkAction}, image_viewer::{ImageViewerAction, ImageViewerMetaData, LoadState}, jump_to_bottom_button::{JumpToBottomButtonWidgetExt, UnreadMessageCount}, no_longer_member_view::{NoLongerMemberReason, NoLongerMemberViewWidgetExt}, popup_list::{PopupKind, enqueue_popup_notification}, restore_status_view::RestoreStatusViewWidgetExt, styles::*, text_or_image::{TextOrImageAction, TextOrImageRef, TextOrImageWidgetRefExt}, timestamp::TimestampWidgetRefExt
     },
@@ -229,9 +229,11 @@ live_design! {
         replied_to_message = <RepliedToMessage> {
             flow: Right
             margin: { bottom: 3, top: 10 }
-            replied_to_message_content = {
-                margin: { left: 29 }
-                padding: { bottom: 10 }
+            content_container = {
+                replied_to_message_content = {
+                    margin: { left: 29 }
+                    padding: { bottom: 10 }
+                }
             }
         }
 
@@ -301,8 +303,10 @@ live_design! {
     CondensedMessage = <Message> {
         padding: { top: 2.0, bottom: 2.0 }
         replied_to_message = <RepliedToMessage> {
-            replied_to_message_content = {
-                margin: { left: 74, bottom: 5.0 }
+            content_container = {
+                replied_to_message_content = {
+                    margin: { left: 74, bottom: 5.0 }
+                }
             }
         }
         body = {
@@ -840,7 +844,7 @@ impl Widget for RoomScreen {
                 if let Some(RoomsListAction::RoomRemoved { room_id, new_state }) = action.downcast_ref() {
                     // Only handle if this is for the current room.
                     if self.room_name_id.as_ref().is_some_and(|rn| rn.room_id() == room_id) {
-                        if let Some(reason) = NoLongerMemberReason::from_room_state(new_state.clone()) {
+                        if let Some(reason) = NoLongerMemberReason::from_room_state(*new_state) {
                             let no_longer_member_view = self.no_longer_member_view(ids!(no_longer_member_view));
                             no_longer_member_view.show(cx, reason);
                         }
@@ -2692,6 +2696,17 @@ pub enum RoomScreenTooltipActions {
     None,
 }
 
+/// Information about a user who is currently typing in a room.
+#[derive(Clone, Debug)]
+pub struct TypingUser {
+    /// The user's unique Matrix ID.
+    pub user_id: OwnedUserId,
+    /// The user's displayable name, or their user ID if no display name is available.
+    pub display_name: String,
+    /// The MXC URI of the user's avatar, if available.
+    pub avatar_url: Option<OwnedMxcUri>,
+}
+
 /// A message that is sent from a background async task to a room's timeline view
 /// for the purpose of update the Timeline UI contents or metadata.
 pub enum TimelineUpdate {
@@ -2775,8 +2790,8 @@ pub enum TimelineUpdate {
     MediaFetched(MediaRequestParameters),
     /// A notice that one or more members of a this room are currently typing.
     TypingUsers {
-        /// The list of users (their displayable name) who are currently typing in this room.
-        users: Vec<String>,
+        /// The list of users who are currently typing in this room.
+        users: Vec<TypingUser>,
     },
     /// The result of a pin/unpin request ([`MatrixRequest::PinEvent`]).
     PinResult {
@@ -3472,6 +3487,8 @@ fn populate_message_view(
             item_id,
         );
         populate_read_receipts(&item, cx, timeline_kind, event_tl_item);
+        // Reset the expand state for the reply preview when reusing the widget
+        item.replied_to_message(ids!(replied_to_message)).reset_expand_state();
         let is_reply_fully_drawn = draw_replied_to_message(
             cx,
             &item.view(ids!(replied_to_message)),
@@ -4065,7 +4082,7 @@ fn draw_replied_to_message(
             TimelineDetails::Ready(replied_to_event) => {
                 let (in_reply_to_username, is_avatar_fully_drawn) =
                     replied_to_message_view
-                        .avatar(ids!(replied_to_message_content.reply_preview_avatar))
+                        .avatar(ids!(content_container.replied_to_message_content.reply_preview_avatar))
                         .set_avatar_and_get_username(
                             cx,
                             timeline_kind,
@@ -4078,7 +4095,7 @@ fn draw_replied_to_message(
                 fully_drawn = is_avatar_fully_drawn;
 
                 replied_to_message_view
-                    .label(ids!(replied_to_message_content.reply_preview_username))
+                    .label(ids!(content_container.replied_to_message_content.reply_preview_username))
                     .set_text(cx, in_reply_to_username.as_str());
                 let msg_body = replied_to_message_view.html_or_plaintext(ids!(reply_preview_body));
                 populate_preview_of_timeline_item(
@@ -4092,26 +4109,26 @@ fn draw_replied_to_message(
             TimelineDetails::Error(_e) => {
                 fully_drawn = true;
                 replied_to_message_view
-                    .label(ids!(replied_to_message_content.reply_preview_username))
+                    .label(ids!(content_container.replied_to_message_content.reply_preview_username))
                     .set_text(cx, "[Error fetching username]");
                 replied_to_message_view
-                    .avatar(ids!(replied_to_message_content.reply_preview_avatar))
+                    .avatar(ids!(content_container.replied_to_message_content.reply_preview_avatar))
                     .show_text(cx, None, None, "?");
                 replied_to_message_view
-                    .html_or_plaintext(ids!(replied_to_message_content.reply_preview_body))
+                    .html_or_plaintext(ids!(content_container.replied_to_message_content.reply_preview_body))
                     .show_plaintext(cx, "[Error fetching replied-to event]");
             }
             td @ TimelineDetails::Pending | td @ TimelineDetails::Unavailable => {
                 // We don't have the replied-to message yet, so we can't fully draw the preview.
                 fully_drawn = false;
                 replied_to_message_view
-                    .label(ids!(replied_to_message_content.reply_preview_username))
+                    .label(ids!(content_container.replied_to_message_content.reply_preview_username))
                     .set_text(cx, "[Loading username...]");
                 replied_to_message_view
-                    .avatar(ids!(replied_to_message_content.reply_preview_avatar))
+                    .avatar(ids!(content_container.replied_to_message_content.reply_preview_avatar))
                     .show_text(cx, None, None, "?");
                 replied_to_message_view
-                    .html_or_plaintext(ids!(replied_to_message_content.reply_preview_body))
+                    .html_or_plaintext(ids!(content_container.replied_to_message_content.reply_preview_body))
                     .show_plaintext(cx, "[Loading replied-to message...]");
 
                 // Confusingly, we need to fetch the details of the `message` (the event that is the reply),

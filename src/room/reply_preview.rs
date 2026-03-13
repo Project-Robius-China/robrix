@@ -2,8 +2,14 @@
 //!
 //! The core view is private, `ReplyPreviewContent`, which is used by both of the public views
 //! exported by this module: `RepliedToMessage` and `ReplyingPreview`.
+//!
+//! `RepliedToMessage` supports expand/collapse for long reply previews.
 
 use makepad_widgets::*;
+
+/// Maximum height for collapsed reply previews (in pixels).
+/// Replies taller than this will show a "Show more" toggle.
+const REPLY_PREVIEW_MAX_COLLAPSED_HEIGHT: f64 = 80.0;
 
 live_design! {
     use link::theme::*;
@@ -133,7 +139,8 @@ live_design! {
     // within a room timeline.
     // That is, this view contains a preview of the earlier message
     // that is shown above the "in-reply-to" message.
-    pub RepliedToMessage = <View> {
+    // Supports expand/collapse for long reply previews.
+    pub RepliedToMessage = {{RepliedToMessage}} {
         visible: false
         width: Fill
         height: Fit
@@ -141,41 +148,168 @@ live_design! {
 
         padding: {top: 0.0, right: 12.0, bottom: 0.0, left: 12.0}
 
-        // A reply preview with a vertical bar drawn in the background.
-        replied_to_message_content = <ReplyPreviewContent> {
-            show_bg: true
-            draw_bg: {
-                instance vertical_bar_color: (USERNAME_TEXT_COLOR)
-                instance vertical_bar_width: 2.0
-                instance border_radius: 0.0
+        // Container that clips the content when collapsed
+        content_container = <View> {
+            width: Fill
+            height: Fit
+            flow: Down
 
-                fn get_color(self) -> vec4 {
-                    return self.color;
-                }
+            // A reply preview with a vertical bar drawn in the background.
+            replied_to_message_content = <ReplyPreviewContent> {
+                show_bg: true
+                draw_bg: {
+                    instance vertical_bar_color: (USERNAME_TEXT_COLOR)
+                    instance vertical_bar_width: 2.0
+                    instance border_radius: 0.0
 
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    fn get_color(self) -> vec4 {
+                        return self.color;
+                    }
 
-                    sdf.box(
-                        0.0,
-                        0.0,
-                        self.rect_size.x,
-                        self.rect_size.y,
-                        max(1.0, self.border_radius)
-                    );
-                    sdf.fill(self.get_color());
+                    fn pixel(self) -> vec4 {
+                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
 
-                    sdf.rect(
-                        0.0,
-                        0.0,
-                        self.vertical_bar_width,
-                        self.rect_size.y
-                    );
-                    sdf.fill(self.vertical_bar_color);
+                        sdf.box(
+                            0.0,
+                            0.0,
+                            self.rect_size.x,
+                            self.rect_size.y,
+                            max(1.0, self.border_radius)
+                        );
+                        sdf.fill(self.get_color());
 
-                    return sdf.result;
+                        sdf.rect(
+                            0.0,
+                            0.0,
+                            self.vertical_bar_width,
+                            self.rect_size.y
+                        );
+                        sdf.fill(self.vertical_bar_color);
+
+                        return sdf.result;
+                    }
                 }
             }
+        }
+
+        // Toggle button for expand/collapse (only shown when content exceeds max height)
+        expand_toggle = <View> {
+            visible: false
+            width: Fill
+            height: Fit
+            align: {x: 0.0, y: 0.5}
+            padding: {left: 16.0, top: 2.0, bottom: 2.0}
+
+            toggle_label = <Label> {
+                width: Fit
+                height: Fit
+                cursor: Hand
+                draw_text: {
+                    text_style: <REGULAR_TEXT> { font_size: 9 }
+                    color: #0066cc
+                }
+                text: "Show more"
+            }
+        }
+    }
+}
+
+/// Actions emitted by the RepliedToMessage widget.
+#[derive(Clone, Debug, DefaultNone)]
+pub enum RepliedToMessageAction {
+    /// The user clicked on the expand/collapse toggle.
+    ToggleExpand,
+    None,
+}
+
+/// A preview of a message that was replied to, with expand/collapse support for long content.
+#[derive(Live, LiveHook, Widget)]
+pub struct RepliedToMessage {
+    #[deref] view: View,
+    /// Whether the reply preview is currently expanded.
+    #[rust] is_expanded: bool,
+    /// Whether this reply content needs expand/collapse (exceeds max height).
+    #[rust] needs_expand_toggle: bool,
+    /// The natural height of the content when fully expanded.
+    #[rust] natural_height: f64,
+}
+
+impl Widget for RepliedToMessage {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+
+        // Handle click on the expand toggle view
+        if let Hit::FingerUp(fe) = event.hits(cx, self.view.view(ids!(expand_toggle)).area()) {
+            if fe.is_over && fe.was_tap() {
+                self.is_expanded = !self.is_expanded;
+                self.update_expand_state(cx);
+            }
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let step = self.view.draw_walk(cx, scope, walk);
+
+        // After drawing, check if we need to apply height constraints
+        // Only do this once when natural_height is not yet measured
+        if self.natural_height == 0.0 {
+            let content_container = self.view.view(ids!(content_container));
+            let content_rect = content_container.area().rect(cx);
+            if content_rect.size.y > 0.0 {
+                self.natural_height = content_rect.size.y;
+
+                if self.natural_height > REPLY_PREVIEW_MAX_COLLAPSED_HEIGHT {
+                    self.needs_expand_toggle = true;
+                    self.update_expand_state(cx);
+                }
+            }
+        }
+
+        step
+    }
+}
+
+impl RepliedToMessage {
+    /// Updates the UI based on the current expand/collapse state.
+    fn update_expand_state(&mut self, cx: &mut Cx) {
+        let expand_toggle = self.view.view(ids!(expand_toggle));
+        let toggle_label = self.view.label(ids!(expand_toggle.toggle_label));
+        let content_container = self.view.view(ids!(content_container));
+
+        expand_toggle.set_visible(cx, self.needs_expand_toggle);
+
+        if self.needs_expand_toggle {
+            if self.is_expanded {
+                toggle_label.set_text(cx, "Show less");
+                // Remove height constraint - use Fit without max
+                content_container.apply_over(cx, live! {
+                    height: Fit
+                });
+            } else {
+                toggle_label.set_text(cx, "Show more");
+                // Apply max height constraint using direct value
+                content_container.apply_over(cx, live! {
+                    height: 80.0
+                });
+            }
+        }
+
+        self.redraw(cx);
+    }
+
+    /// Resets the expand state (call when reusing the widget for a different reply).
+    pub fn reset_expand_state(&mut self) {
+        self.is_expanded = false;
+        self.needs_expand_toggle = false;
+        self.natural_height = 0.0;
+    }
+}
+
+impl RepliedToMessageRef {
+    /// See [`RepliedToMessage::reset_expand_state()`].
+    pub fn reset_expand_state(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.reset_expand_state();
         }
     }
 }
