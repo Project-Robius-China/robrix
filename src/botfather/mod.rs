@@ -1,7 +1,10 @@
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use futures_util::StreamExt;
@@ -19,7 +22,7 @@ use robrix_botfather::{
 use crate::{
     home::rooms_list::RoomsListRef,
     persistence::matrix_state::persistent_state_dir,
-    shared::popup_list::PopupKind,
+    shared::popup_list::{PopupKind, enqueue_popup_notification},
     sliding_sync::{current_user_id, get_client, spawn_on_tokio, spawn_on_tokio_with_handle},
 };
 use tokio::task::JoinHandle;
@@ -37,6 +40,7 @@ static ACTIVE_STREAMS: Mutex<Vec<ActiveBotStream>> = Mutex::new(Vec::new());
 static QUEUED_STREAMS: Mutex<VecDeque<QueuedBotStream>> = Mutex::new(VecDeque::new());
 static STREAM_PREVIEWS: Mutex<Vec<StreamPreviewState>> = Mutex::new(Vec::new());
 static DIRECT_STREAM_MESSAGES: Mutex<Vec<DirectStreamMessageState>> = Mutex::new(Vec::new());
+static DIRECT_STREAM_PLACEHOLDER_SEQ: AtomicU64 = AtomicU64::new(1);
 
 struct BridgeContext {
     user_id: String,
@@ -91,6 +95,7 @@ struct StreamPreviewState {
 struct DirectStreamMessageState {
     room_id: String,
     thread_root_event_id: Option<String>,
+    placeholder_token: String,
     send_handle: Option<SendHandle>,
     pending_action: Option<DirectStreamPendingAction>,
 }
@@ -664,29 +669,41 @@ pub fn room_stream_preview_enabled() -> bool {
         .unwrap_or(false)
 }
 
-pub fn direct_stream_message_body(thread_root_event_id: Option<&str>) -> String {
+pub fn direct_stream_message_body(
+    thread_root_event_id: Option<&str>,
+    placeholder_token: &str,
+) -> String {
     format!(
-        "!BOT_STREAM|{}|",
+        "!BOT_STREAM|{}|{}|",
         thread_root_event_id.unwrap_or("main"),
+        placeholder_token,
     )
 }
 
-pub fn request_direct_stream_message(room_id: &str, thread_root_event_id: Option<&str>) -> bool {
+pub fn request_direct_stream_message(
+    room_id: &str,
+    thread_root_event_id: Option<&str>,
+) -> Option<String> {
     let mut messages = DIRECT_STREAM_MESSAGES.lock().unwrap();
     if messages
         .iter()
         .any(|message| direct_stream_scope_matches(message, room_id, thread_root_event_id))
     {
-        return false;
+        return None;
     }
 
+    let placeholder_token = format!(
+        "bot-stream-{}",
+        DIRECT_STREAM_PLACEHOLDER_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
     messages.push(DirectStreamMessageState {
         room_id: room_id.to_string(),
         thread_root_event_id: thread_root_event_id.map(ToOwned::to_owned),
+        placeholder_token: placeholder_token.clone(),
         send_handle: None,
         pending_action: None,
     });
-    true
+    Some(placeholder_token)
 }
 
 pub fn attach_direct_stream_message_handle(
@@ -715,6 +732,20 @@ pub fn has_live_direct_stream_message(
 ) -> bool {
     DIRECT_STREAM_MESSAGES.lock().unwrap().iter().any(|message| {
         direct_stream_scope_matches(message, room_id, thread_root_event_id)
+    })
+}
+
+pub fn is_live_direct_stream_placeholder(
+    room_id: &str,
+    thread_root_event_id: Option<&str>,
+    placeholder_token: Option<&str>,
+) -> bool {
+    let Some(placeholder_token) = placeholder_token else {
+        return false;
+    };
+    DIRECT_STREAM_MESSAGES.lock().unwrap().iter().any(|message| {
+        direct_stream_scope_matches(message, room_id, thread_root_event_id)
+            && message.placeholder_token == placeholder_token
     })
 }
 
@@ -1321,7 +1352,7 @@ pub fn run_room_healthcheck(room_id: String) -> Result<(), String> {
             .healthcheck()
             .await
             .map(|_| format!("Healthcheck succeeded for \"{bot_name}\"."))
-            .map_err(|error| error.to_string());
+            .map_err(|error| format_runtime_error_message(&error.to_string()));
         let (message, kind) = match &result {
             Ok(message) => (message.clone(), PopupKind::Success),
             Err(error) => (error.clone(), PopupKind::Error),
@@ -1367,7 +1398,10 @@ pub fn run_bot_healthcheck(bot_selector: String) -> Result<(), String> {
                 PopupKind::Success,
             ),
             Err(error) => (
-                format!("Healthcheck failed for \"{bot_name}\": {error}"),
+                format!(
+                    "Healthcheck failed for \"{bot_name}\": {}",
+                    format_runtime_error_message(&error.to_string())
+                ),
                 PopupKind::Error,
             ),
         };
@@ -1378,6 +1412,56 @@ pub fn run_bot_healthcheck(bot_selector: String) -> Result<(), String> {
         });
     });
     Ok(())
+}
+
+pub fn run_runtime_healthcheck(runtime_kind: RuntimeKind) -> Result<(), String> {
+    let (runtime_name, runtime) = with_context_mut(|ctx| {
+        let profile = runtime_profile_for_kind(&ctx.state, runtime_kind).ok_or_else(|| {
+            format!(
+                "{} runtime is not configured yet.",
+                match runtime_kind {
+                    RuntimeKind::Crew => "Crew",
+                    RuntimeKind::OpenClaw => "OpenClaw",
+                }
+            )
+        })?;
+        let runtime = robrix_botfather::RuntimeAdapter::from_profile(profile)
+            .map_err(|error| error.to_string())?;
+        Ok((profile.name.clone(), runtime))
+    })?;
+
+    spawn_on_tokio(async move {
+        let (message, kind) = match runtime.healthcheck().await {
+            Ok(()) => (
+                format!("Healthcheck succeeded for \"{runtime_name}\"."),
+                PopupKind::Success,
+            ),
+            Err(error) => (
+                format!(
+                    "Healthcheck failed for \"{runtime_name}\": {}",
+                    format_runtime_error_message(&error.to_string())
+                ),
+                PopupKind::Error,
+            ),
+        };
+        Cx::post_action(BotfatherAction::Status(message.clone()));
+        enqueue_popup_notification(message, kind, Some(6.0));
+    });
+    Ok(())
+}
+
+fn format_runtime_error_message(error: &str) -> String {
+    let trimmed = error.trim();
+    if trimmed.contains("503 Service Unavailable") {
+        return "503 Service Unavailable. Check whether the runtime service is running and the configured endpoint is reachable.".into();
+    }
+    if trimmed.contains("401 Unauthorized") {
+        return "401 Unauthorized. Check the configured auth token or token environment variable.".into();
+    }
+    if trimmed.contains("404 Not Found") {
+        return "404 Not Found. Check whether the runtime endpoint path is correct.".into();
+    }
+    trimmed.to_string()
 }
 
 pub fn stream_room_prompt(room_id: String, prompt: String) -> Result<(), String> {

@@ -98,7 +98,7 @@ live_design! {
                 text_style: <REGULAR_TEXT>{font_size: 10.5}
                 color: (COLOR_TEXT)
             }
-            text: "This panel manages the room's active bot binding. Pick the room bot from the dropdown below. If both runtimes are available and you have not overridden the room, Crew still wins by default."
+            text: "This panel manages the room's active bot binding. Pick the room bot from the dropdown below, then click Bind Room to apply it. If both runtimes are available and you have not overridden the room, Crew still wins by default."
         }
 
         binding_summary_label = <Label> {
@@ -129,6 +129,24 @@ live_design! {
             flow: RightWrap
             spacing: 10
 
+            bind_room_button = <RobrixIconButton> {
+                width: Fit
+                padding: 12
+                draw_bg: {
+                    color: (COLOR_BG_ACCEPT_GREEN)
+                    border_color: (COLOR_FG_ACCEPT_GREEN)
+                }
+                draw_icon: {
+                    svg_file: (ICON_LINK)
+                    color: (COLOR_FG_ACCEPT_GREEN)
+                }
+                draw_text: {
+                    color: (COLOR_FG_ACCEPT_GREEN)
+                }
+                icon_walk: { width: 14, height: 14 }
+                text: "Bind Room"
+            }
+
             unbind_room_button = <RobrixIconButton> {
                 width: Fit
                 padding: 12
@@ -147,19 +165,6 @@ live_design! {
                 text: "Unbind Room"
             }
 
-            healthcheck_button = <RobrixIconButton> {
-                width: Fit
-                padding: 12
-                draw_bg: {
-                    color: (COLOR_SECONDARY)
-                }
-                draw_icon: {
-                    svg_file: (ICON_INFO)
-                    color: (COLOR_TEXT)
-                }
-                icon_walk: { width: 14, height: 14 }
-                text: "Healthcheck"
-            }
         }
 
         preview_card = <View> {
@@ -260,6 +265,10 @@ pub struct BotfatherRoomPanel {
     view: View,
     #[rust]
     bot_choice_ids: Vec<String>,
+    #[rust]
+    selected_bot_id: Option<String>,
+    #[rust]
+    rendered_room_id: Option<String>,
 }
 
 #[derive(Clone, Debug, DefaultNone)]
@@ -276,32 +285,30 @@ impl Widget for BotfatherRoomPanel {
             let _ = botfather::ensure_loaded_for_current_user();
             let _ = botfather::refresh_inventory_from_rooms_list(cx);
             self.apply_preview_visibility(cx);
-            self.refresh_room_state(cx, current_room_id(scope));
+            let current_room_id = current_room_id(scope);
+            if self.rendered_room_id != current_room_id {
+                self.refresh_room_state(cx, current_room_id.clone());
+                self.rendered_room_id = current_room_id;
+            }
             self.refresh_stream_preview(cx, scope);
         }
 
         if let Event::Actions(actions) = event {
             let current_room_id = current_room_id(scope);
             let bot_selector_dropdown = self.drop_down(ids!(bot_selector_dropdown));
+            let bind_room_button = self.view.button(ids!(bind_room_button));
             let unbind_room_button = self.view.button(ids!(unbind_room_button));
-            let healthcheck_button = self.view.button(ids!(healthcheck_button));
             let post_preview_button = self.view.button(ids!(post_preview_button));
             let clear_preview_button = self.view.button(ids!(clear_preview_button));
             let close_button = self.view.button(ids!(close_button));
 
             if let Some(selected_index) = bot_selector_dropdown.selected(actions) {
                 if let Some(bot_id) = self.bot_choice_ids.get(selected_index).cloned() {
-                    match current_room_id.as_deref() {
-                        Some(room_id) => match botfather::bind_room_to_bot(room_id, &bot_id) {
-                            Ok(message) => {
-                                self.refresh_room_state(cx, current_room_id.clone());
-                                self.refresh_stream_preview(cx, scope);
-                                self.set_status(cx, &message);
-                            }
-                            Err(error) => self.set_status(cx, &error),
-                        },
-                        None => self.set_status(cx, "This room is not ready for BotFather yet."),
-                    }
+                    self.selected_bot_id = Some(bot_id.clone());
+                    self.set_status(
+                        cx,
+                        &format!("Selected \"{bot_id}\". Click Bind Room to apply it."),
+                    );
                 } else if self.bot_choice_ids.is_empty() {
                     self.set_status(
                         cx,
@@ -310,24 +317,36 @@ impl Widget for BotfatherRoomPanel {
                 }
             }
 
+            if bind_room_button.clicked(actions) {
+                match (current_room_id.as_deref(), self.selected_bot_id.as_deref()) {
+                    (Some(room_id), Some(bot_id)) => match botfather::bind_room_to_bot(room_id, bot_id) {
+                        Ok(message) => {
+                            self.refresh_room_state(cx, current_room_id.clone());
+                            self.sync_selected_bot(cx, current_room_id.as_deref());
+                            self.rendered_room_id = current_room_id.clone();
+                            self.refresh_stream_preview(cx, scope);
+                            self.set_status(cx, &message);
+                        }
+                        Err(error) => self.set_status(cx, &error),
+                    },
+                    (Some(_), None) => self.set_status(
+                        cx,
+                        "Pick a bot from the Room Bot dropdown before binding the room.",
+                    ),
+                    (None, _) => self.set_status(cx, "This room is not ready for BotFather yet."),
+                }
+            }
+
             if unbind_room_button.clicked(actions) {
                 match current_room_id.as_deref() {
                     Some(room_id) => match botfather::unbind_room(room_id) {
                         Ok(()) => {
                             self.refresh_room_state(cx, current_room_id.clone());
+                            self.sync_selected_bot(cx, current_room_id.as_deref());
+                            self.rendered_room_id = current_room_id.clone();
                             self.refresh_stream_preview(cx, scope);
                             self.set_status(cx, "Removed the room-level bot override.");
                         }
-                        Err(error) => self.set_status(cx, &error),
-                    },
-                    None => self.set_status(cx, "This room is not ready for BotFather yet."),
-                }
-            }
-
-            if healthcheck_button.clicked(actions) {
-                match current_room_id.clone() {
-                    Some(room_id) => match botfather::run_room_healthcheck(room_id) {
-                        Ok(()) => self.set_status(cx, "Running bot runtime healthcheck..."),
                         Err(error) => self.set_status(cx, &error),
                     },
                     None => self.set_status(cx, "This room is not ready for BotFather yet."),
@@ -420,6 +439,8 @@ impl Widget for BotfatherRoomPanel {
                 if let Some(BotfatherAction::StateChanged) = action.downcast_ref() {
                     self.apply_preview_visibility(cx);
                     self.refresh_room_state(cx, current_room_id.clone());
+                    self.sync_selected_bot(cx, current_room_id.as_deref());
+                    self.rendered_room_id = current_room_id.clone();
                     self.refresh_stream_preview(cx, scope);
                     continue;
                 }
@@ -488,6 +509,8 @@ impl BotfatherRoomPanel {
             .label(ids!(binding_summary_label))
             .set_text(cx, "No bot binding resolved yet.");
         self.view.label(ids!(status_label)).set_text(cx, "");
+        self.selected_bot_id = None;
+        self.rendered_room_id = None;
         self.update_bot_selector(cx, None);
         self.clear_preview(cx);
     }
@@ -505,6 +528,7 @@ impl BotfatherRoomPanel {
 
         if options.is_empty() {
             self.bot_choice_ids.clear();
+            self.selected_bot_id = None;
             let placeholder = if room_id.is_some() {
                 "No bots configured"
             } else {
@@ -532,7 +556,29 @@ impl BotfatherRoomPanel {
                     .position(|candidate| candidate == &bot_id)
             })
             .unwrap_or(0);
+        self.selected_bot_id = self.bot_choice_ids.get(selected_index).cloned();
         dropdown.set_selected_item(cx, selected_index);
+    }
+
+    fn sync_selected_bot(&mut self, cx: &mut Cx, room_id: Option<&str>) {
+        let Some(room_id) = room_id else {
+            return;
+        };
+        let Some(bot_id) = botfather::room_primary_bot_id(room_id) else {
+            self.selected_bot_id = self.bot_choice_ids.first().cloned();
+            self.drop_down(ids!(bot_selector_dropdown))
+                .set_selected_item(cx, 0);
+            return;
+        };
+        if let Some(selected_index) = self
+            .bot_choice_ids
+            .iter()
+            .position(|candidate| candidate == &bot_id)
+        {
+            self.selected_bot_id = Some(bot_id);
+            self.drop_down(ids!(bot_selector_dropdown))
+                .set_selected_item(cx, selected_index);
+        }
     }
 
     fn refresh_stream_preview(&mut self, cx: &mut Cx, scope: &mut Scope) {

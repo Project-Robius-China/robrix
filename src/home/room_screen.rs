@@ -1579,14 +1579,16 @@ impl RoomScreen {
                             if let TimelineItemContent::MsgLike(msg_like_content) = event_tl_item.content() {
                                 if let MsgLikeKind::Message(message) = &msg_like_content.kind {
                                     if let MessageType::Text(text_content) = message.msgtype() {
-                                        if let Some(bot_stream_thread_root_event_id) =
+                                        if let Some(bot_stream_header) =
                                             parse_bot_stream_header(&text_content.body)
                                         {
                                             visible_bot_placeholders
-                                                .push(bot_stream_thread_root_event_id.clone());
-                                            let is_live_placeholder = botfather::has_live_direct_stream_message(
+                                                .push(bot_stream_header.thread_root_event_id.clone());
+                                            let is_live_placeholder =
+                                                botfather::is_live_direct_stream_placeholder(
                                                 tl.kind.room_id().as_str(),
-                                                bot_stream_thread_root_event_id.as_deref(),
+                                                bot_stream_header.thread_root_event_id.as_deref(),
+                                                bot_stream_header.placeholder_token.as_deref(),
                                             );
                                             let placeholder_created_at: u64 =
                                                 event_tl_item.timestamp().get().into();
@@ -3579,18 +3581,19 @@ fn populate_message_view(
                         // Check for SSE pattern in the message and display SSE content if available.
                         // Note: SSE fetch is triggered in process_timeline_updates when NewItems arrive.
                         let (display_body, display_formatted) =
-                            if let Some(bot_stream_thread_root_event_id) =
+                            if let Some(bot_stream_header) =
                                 parse_bot_stream_header(body)
                             {
-                                if !botfather::has_live_direct_stream_message(
+                                if !botfather::is_live_direct_stream_placeholder(
                                     timeline_kind.room_id().as_str(),
-                                    bot_stream_thread_root_event_id.as_deref(),
+                                    bot_stream_header.thread_root_event_id.as_deref(),
+                                    bot_stream_header.placeholder_token.as_deref(),
                                 ) {
                                     (String::new(), None)
                                 } else {
                                 let preview = botfather::room_stream_preview(
                                     timeline_kind.room_id().as_str(),
-                                    bot_stream_thread_root_event_id.as_deref(),
+                                    bot_stream_header.thread_root_event_id.as_deref(),
                                 );
                                 let display_body = match preview {
                                     Some(preview) if !preview.text.trim().is_empty() => preview.text,
@@ -5385,7 +5388,12 @@ pub fn clear_timeline_states(_cx: &mut Cx) {
 /// For example: `!SSE|http://127.0.0.1:3000/events|`
 ///
 /// Returns the URL if the pattern matches, otherwise None.
-fn parse_bot_stream_header(body: &str) -> Option<Option<String>> {
+struct BotStreamHeader {
+    thread_root_event_id: Option<String>,
+    placeholder_token: Option<String>,
+}
+
+fn parse_bot_stream_header(body: &str) -> Option<BotStreamHeader> {
     let trimmed = body.trim();
     if !trimmed.starts_with("!BOT_STREAM|") {
         return None;
@@ -5393,11 +5401,20 @@ fn parse_bot_stream_header(body: &str) -> Option<Option<String>> {
 
     let end_idx = trimmed[12..].find('|')?;
     let scope = &trimmed[12..12 + end_idx];
-    if scope.is_empty() || scope == "main" {
-        Some(None)
+    let thread_root_event_id = if scope.is_empty() || scope == "main" {
+        None
     } else {
-        Some(Some(scope.to_string()))
-    }
+        Some(scope.to_string())
+    };
+    let token_start = 12 + end_idx + 1;
+    let placeholder_token = trimmed[token_start..]
+        .find('|')
+        .map(|token_end_idx| trimmed[token_start..token_start + token_end_idx].to_string())
+        .filter(|token| !token.is_empty());
+    Some(BotStreamHeader {
+        thread_root_event_id,
+        placeholder_token,
+    })
 }
 
 fn parse_sse_header(body: &str) -> Option<String> {

@@ -347,7 +347,8 @@ impl RoomInputBar {
                 if room_screen_props.timeline_kind.room_id().as_str() == room_id
                     && same_scope
                     && !botfather::room_stream_preview_enabled()
-                    && botfather::request_direct_stream_message(room_id, thread_root_event_id.as_deref())
+                    && let Some(placeholder_token) =
+                        botfather::request_direct_stream_message(room_id, thread_root_event_id.as_deref())
                 {
                     let replied_to = room_screen_props.timeline_kind.thread_root_event_id().map(
                         |thread_root_event_id| Reply {
@@ -360,6 +361,7 @@ impl RoomInputBar {
                         message: RoomMessageEventContent::text_markdown(
                             botfather::direct_stream_message_body(
                                 thread_root_event_id.as_deref(),
+                                &placeholder_token,
                             ),
                         ),
                         replied_to,

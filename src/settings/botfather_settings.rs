@@ -86,6 +86,13 @@ live_design! {
         spacing: 8
     }
 
+    RuntimeCardBody = <View> {
+        visible: false
+        width: Fill, height: Fit
+        flow: Down
+        spacing: 8
+    }
+
     pub BotfatherSettings = {{BotfatherSettings}} {
         width: Fill, height: Fit
         flow: Down
@@ -144,17 +151,39 @@ live_design! {
                     text: "Crew Runtime"
                 }
 
-                crew_runtime_summary_label = <SummaryLabel> {}
+                crew_runtime_body = <RuntimeCardBody> {
+                    crew_runtime_summary_label = <SummaryLabel> {}
 
-                crew_runtime_form = <RuntimeForm> {
-                    crew_endpoint_input = <SimpleTextInput> {
+                    <View> {
                         width: Fill, height: Fit
-                        empty_text: "http://127.0.0.1:8000"
+                        flow: RightWrap
+                        spacing: 10
+
+                        crew_runtime_healthcheck_button = <RobrixIconButton> {
+                            width: Fit
+                            padding: 12
+                            draw_bg: {
+                                color: (COLOR_SECONDARY)
+                            }
+                            draw_icon: {
+                                svg_file: (ICON_INFO)
+                                color: (COLOR_TEXT)
+                            }
+                            icon_walk: { width: 14, height: 14 }
+                            text: "Healthcheck"
+                        }
                     }
 
-                    crew_auth_token_env_input = <SimpleTextInput> {
-                        width: Fill, height: Fit
-                        empty_text: "Optional bearer token env var, e.g. CREW_API_TOKEN"
+                    crew_runtime_form = <RuntimeForm> {
+                        crew_endpoint_input = <SimpleTextInput> {
+                            width: Fill, height: Fit
+                            empty_text: "http://127.0.0.1:8000"
+                        }
+
+                        crew_auth_token_env_input = <SimpleTextInput> {
+                            width: Fill, height: Fit
+                            empty_text: "Optional bearer token env var, e.g. CREW_API_TOKEN"
+                        }
                     }
                 }
             }
@@ -164,17 +193,39 @@ live_design! {
                     text: "OpenClaw Runtime"
                 }
 
-                openclaw_runtime_summary_label = <SummaryLabel> {}
+                openclaw_runtime_body = <RuntimeCardBody> {
+                    openclaw_runtime_summary_label = <SummaryLabel> {}
 
-                openclaw_runtime_form = <RuntimeForm> {
-                    openclaw_gateway_input = <SimpleTextInput> {
+                    <View> {
                         width: Fill, height: Fit
-                        empty_text: "ws://127.0.0.1:24282/ws"
+                        flow: RightWrap
+                        spacing: 10
+
+                        openclaw_runtime_healthcheck_button = <RobrixIconButton> {
+                            width: Fit
+                            padding: 12
+                            draw_bg: {
+                                color: (COLOR_SECONDARY)
+                            }
+                            draw_icon: {
+                                svg_file: (ICON_INFO)
+                                color: (COLOR_TEXT)
+                            }
+                            icon_walk: { width: 14, height: 14 }
+                            text: "Healthcheck"
+                        }
                     }
 
-                    openclaw_auth_token_env_input = <SimpleTextInput> {
-                        width: Fill, height: Fit
-                        empty_text: "Optional gateway token env var"
+                    openclaw_runtime_form = <RuntimeForm> {
+                        openclaw_gateway_input = <SimpleTextInput> {
+                            width: Fill, height: Fit
+                            empty_text: "ws://127.0.0.1:24282/ws"
+                        }
+
+                        openclaw_auth_token_env_input = <SimpleTextInput> {
+                            width: Fill, height: Fit
+                            empty_text: "Optional gateway token env var"
+                        }
                     }
                 }
             }
@@ -346,6 +397,11 @@ impl Widget for BotfatherSettings {
             let room_stream_mode_toggle = self.view.button(ids!(room_stream_mode_toggle));
             let crew_runtime_toggle = self.view.button(ids!(crew_runtime_toggle));
             let openclaw_runtime_toggle = self.view.button(ids!(openclaw_runtime_toggle));
+            let crew_runtime_healthcheck_button =
+                self.view.button(ids!(crew_runtime_healthcheck_button));
+            let openclaw_runtime_healthcheck_button = self
+                .view
+                .button(ids!(openclaw_runtime_healthcheck_button));
             let crew_endpoint_input = self.view.text_input(ids!(crew_endpoint_input));
             let crew_auth_token_env_input = self.view.text_input(ids!(crew_auth_token_env_input));
             let openclaw_gateway_input = self.view.text_input(ids!(openclaw_gateway_input));
@@ -372,6 +428,18 @@ impl Widget for BotfatherSettings {
             if openclaw_runtime_toggle.clicked(actions) {
                 self.openclaw_runtime_expanded = !self.openclaw_runtime_expanded;
                 self.apply_runtime_cards_state(cx);
+            }
+            if crew_runtime_healthcheck_button.clicked(actions) {
+                match botfather::run_runtime_healthcheck(RuntimeKind::Crew) {
+                    Ok(()) => self.set_status(cx, "Running Crew runtime healthcheck..."),
+                    Err(error) => self.set_status(cx, &error),
+                }
+            }
+            if openclaw_runtime_healthcheck_button.clicked(actions) {
+                match botfather::run_runtime_healthcheck(RuntimeKind::OpenClaw) {
+                    Ok(()) => self.set_status(cx, "Running OpenClaw runtime healthcheck..."),
+                    Err(error) => self.set_status(cx, &error),
+                }
             }
             if room_stream_mode_toggle.clicked(actions) {
                 let enable_preview = !botfather::room_stream_preview_enabled();
@@ -581,6 +649,12 @@ impl BotfatherSettings {
     }
 
     fn apply_runtime_cards_state(&mut self, cx: &mut Cx) {
+        self.view
+            .view(ids!(crew_runtime_body))
+            .set_visible(cx, self.crew_runtime_expanded);
+        self.view
+            .view(ids!(openclaw_runtime_body))
+            .set_visible(cx, self.openclaw_runtime_expanded);
         self.view
             .view(ids!(crew_runtime_form))
             .set_visible(cx, self.crew_runtime_expanded);
