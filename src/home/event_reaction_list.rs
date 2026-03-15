@@ -126,14 +126,22 @@ pub enum ReactionListAction {
 
 #[derive(Live, LiveHook, Widget)]
 pub struct ReactionList {
-    #[redraw] #[rust] area: Area,
-    #[live] item: Option<LivePtr>,
-    #[rust] children: Vec<(ButtonRef, ReactionData)>,
-    #[layout] layout: Layout,
-    #[walk] walk: Walk,
+    #[redraw]
+    #[rust]
+    area: Area,
+    #[live]
+    item: Option<LivePtr>,
+    #[rust]
+    children: Vec<(ButtonRef, ReactionData)>,
+    #[layout]
+    layout: Layout,
+    #[walk]
+    walk: Walk,
 
-    #[rust] timeline_kind: Option<TimelineKind>,
-    #[rust] timeline_event_id: Option<TimelineEventItemId>,
+    #[rust]
+    timeline_kind: Option<TimelineKind>,
+    #[rust]
+    timeline_event_id: Option<TimelineEventItemId>,
 }
 impl Widget for ReactionList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -175,7 +183,9 @@ impl Widget for ReactionList {
                     }
                     // Otherwise, a primary click/press over the button should toggle the reaction.
                     else if fue.is_primary_hit() && fue.was_tap() {
-                        let Some(kind) = &self.timeline_kind else { return };
+                        let Some(kind) = &self.timeline_kind else {
+                            return;
+                        };
                         let Some(timeline_event_id) = &self.timeline_event_id else {
                             return;
                         };
@@ -202,7 +212,10 @@ impl Widget for ReactionList {
                         let (bg_color, border_color) = if !reaction_data.includes_user {
                             (EMOJI_BG_COLOR_INCLUDE_SELF, EMOJI_BORDER_COLOR_INCLUDE_SELF)
                         } else {
-                            (EMOJI_BG_COLOR_NOT_INCLUDE_SELF, EMOJI_BORDER_COLOR_NOT_INCLUDE_SELF)
+                            (
+                                EMOJI_BG_COLOR_NOT_INCLUDE_SELF,
+                                EMOJI_BORDER_COLOR_NOT_INCLUDE_SELF,
+                            )
                         };
                         button_ref.apply_over(cx, live! {
                             draw_bg: { reaction_bg_color: (bg_color) , reaction_border_color: (border_color) }
@@ -243,18 +256,16 @@ impl ReactionList {
     }
 
     /// Deals with to any event/hit that triggers a hover-out action.
-    fn do_hover_out(
-        &self,
-        cx: &mut Cx,
-        scope: &mut Scope,
-        button_ref: &ButtonRef,
-    ) {
-        cx.widget_action(self.widget_uid(), &scope.path, RoomScreenTooltipActions::HoverOut);
+    fn do_hover_out(&self, cx: &mut Cx, scope: &mut Scope, button_ref: &ButtonRef) {
+        cx.widget_action(
+            self.widget_uid(),
+            &scope.path,
+            RoomScreenTooltipActions::HoverOut,
+        );
         button_ref.apply_over(cx, live!(draw_bg: {hover: 0.0}));
         cx.set_cursor(MouseCursor::Default);
     }
 }
-
 
 impl ReactionListRef {
     /// Set the list of reactions and their counts to display in the ReactionList widget,
@@ -302,7 +313,8 @@ impl ReactionListRef {
                     cx,
                     sender.clone(),
                     Some(timeline_kind.room_id()),
-                    true, |_, _| { },
+                    true,
+                    |_, _| {},
                 );
             }
 
@@ -313,10 +325,10 @@ impl ReactionListRef {
                 room_id: timeline_kind.room_id().clone(),
             };
             let button = WidgetRef::new_from_ptr(cx, inner.item).as_button();
-            button.set_text(cx, &format!("{}  {}",
-                reaction_data.reaction,
-                reaction_senders.len()
-            ));
+            button.set_text(
+                cx,
+                &format!("{}  {}", reaction_data.reaction, reaction_senders.len()),
+            );
             let (bg_color, border_color) = if reaction_data.includes_user {
                 (EMOJI_BG_COLOR_INCLUDE_SELF, EMOJI_BORDER_COLOR_INCLUDE_SELF)
             } else {

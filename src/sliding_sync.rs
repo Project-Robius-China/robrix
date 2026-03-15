@@ -2260,7 +2260,11 @@ async fn matrix_worker_task(
                 });
             }
 
-            MatrixRequest::FetchSse { timeline_kind, event_id, url } => {
+            MatrixRequest::FetchSse {
+                timeline_kind,
+                event_id,
+                url,
+            } => {
                 let _fetch_sse_task = Handle::current().spawn(async move {
                     use futures_util::StreamExt;
                     use reqwest_eventsource::{Event, EventSource};

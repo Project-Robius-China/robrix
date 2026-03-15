@@ -2,9 +2,8 @@ use crate::shared::popup_list::PopupKind;
 
 use super::{
     bind_room_to_bot, bots_overview, create_bot, diagnostics_overview, run_bot_healthcheck,
-    run_room_healthcheck, runtime_summary, set_bot_agent,
-    set_bot_model, set_bot_runtime_profile, set_bot_system_prompt, status_overview, unbind_room,
-    workspace_overview,
+    run_room_healthcheck, runtime_summary, set_bot_agent, set_bot_model, set_bot_runtime_profile,
+    set_bot_system_prompt, status_overview, unbind_room, workspace_overview,
 };
 use robrix_botfather::RuntimeKind;
 

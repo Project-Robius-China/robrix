@@ -41,7 +41,9 @@ use crate::{
         popup_list::{enqueue_popup_notification, PopupKind},
         styles::*,
     },
-    sliding_sync::{spawn_on_tokio, submit_async_request, MatrixRequest, TimelineKind, UserPowerLevels},
+    sliding_sync::{
+        spawn_on_tokio, submit_async_request, MatrixRequest, TimelineKind, UserPowerLevels,
+    },
     utils,
 };
 
@@ -338,17 +340,26 @@ impl RoomInputBar {
                 enqueue_popup_notification(message.clone(), kind.clone(), *auto_dismissal_duration);
             }
 
-            if let Some(BotfatherAction::StreamDelta { room_id, thread_root_event_id, .. }) = action.downcast_ref() {
+            if let Some(BotfatherAction::StreamDelta {
+                room_id,
+                thread_root_event_id,
+                ..
+            }) = action.downcast_ref()
+            {
                 let current_thread_root_event_id = room_screen_props
                     .timeline_kind
                     .thread_root_event_id()
                     .map(|event_id| event_id.to_string());
-                let same_scope = current_thread_root_event_id.as_ref() == thread_root_event_id.as_ref();
+                let same_scope =
+                    current_thread_root_event_id.as_ref() == thread_root_event_id.as_ref();
                 if room_screen_props.timeline_kind.room_id().as_str() == room_id
                     && same_scope
                     && !botfather::room_stream_preview_enabled()
-                    && let Some(placeholder_token) =
-                        botfather::request_direct_stream_message(room_id, thread_root_event_id.as_deref())
+                    && botfather::room_uses_current_user_sender(room_id)
+                    && let Some(placeholder_token) = botfather::request_direct_stream_message(
+                        room_id,
+                        thread_root_event_id.as_deref(),
+                    )
                 {
                     let replied_to = room_screen_props.timeline_kind.thread_root_event_id().map(
                         |thread_root_event_id| Reply {
@@ -377,16 +388,50 @@ impl RoomInputBar {
                 }
             }
 
-            if let Some(BotfatherAction::StreamFinished { room_id, text, thread_root_event_id }) = action.downcast_ref() {
+            if let Some(BotfatherAction::StreamFinished {
+                room_id,
+                text,
+                thread_root_event_id,
+            }) = action.downcast_ref()
+            {
                 let current_thread_root_event_id = room_screen_props
                     .timeline_kind
                     .thread_root_event_id()
                     .map(|event_id| event_id.to_string());
-                let same_scope = current_thread_root_event_id.as_ref() == thread_root_event_id.as_ref();
+                let same_scope =
+                    current_thread_root_event_id.as_ref() == thread_root_event_id.as_ref();
                 if room_screen_props.timeline_kind.room_id().as_str() == room_id
                     && same_scope
                     && !botfather::room_stream_preview_enabled()
                 {
+                    if !botfather::room_uses_current_user_sender(room_id) {
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        let room_id = room_id.clone();
+                        let thread_root_event_id = thread_root_event_id.clone();
+                        let final_text = text.clone();
+                        spawn_on_tokio(async move {
+                            let status = match botfather::post_markdown_via_resolved_sender(
+                                &room_id,
+                                thread_root_event_id.as_deref(),
+                                final_text,
+                            )
+                            .await
+                            {
+                                Ok(message) => {
+                                    botfather::clear_room_stream_preview(
+                                        &room_id,
+                                        thread_root_event_id.as_deref(),
+                                    );
+                                    message
+                                }
+                                Err(error) => error,
+                            };
+                            Cx::post_action(BotfatherAction::Status(status));
+                        });
+                        continue;
+                    }
                     if text.trim().is_empty() {
                         match botfather::cancel_direct_stream_message(
                             room_id,
@@ -397,7 +442,9 @@ impl RoomInputBar {
                                 spawn_on_tokio(async move {
                                     if let Err(error) = send_handle.abort().await {
                                         enqueue_popup_notification(
-                                            format!("Failed to clear empty bot stream message: {error}"),
+                                            format!(
+                                                "Failed to clear empty bot stream message: {error}"
+                                            ),
                                             PopupKind::Error,
                                             Some(5.0),
                                         );
@@ -417,11 +464,16 @@ impl RoomInputBar {
                                 let final_text = text.clone();
                                 spawn_on_tokio(async move {
                                     if let Err(error) = send_handle
-                                        .edit(RoomMessageEventContent::text_markdown(final_text).into())
+                                        .edit(
+                                            RoomMessageEventContent::text_markdown(final_text)
+                                                .into(),
+                                        )
                                         .await
                                     {
                                         enqueue_popup_notification(
-                                            format!("Failed to finalize bot stream message: {error}"),
+                                            format!(
+                                                "Failed to finalize bot stream message: {error}"
+                                            ),
                                             PopupKind::Error,
                                             Some(5.0),
                                         );
@@ -430,12 +482,15 @@ impl RoomInputBar {
                             }
                             botfather::DirectStreamHandleState::Pending => {}
                             botfather::DirectStreamHandleState::Missing => {
-                                let replied_to = room_screen_props.timeline_kind.thread_root_event_id().map(
-                                    |thread_root_event_id| Reply {
+                                let replied_to = room_screen_props
+                                    .timeline_kind
+                                    .thread_root_event_id()
+                                    .map(|thread_root_event_id| Reply {
                                         event_id: thread_root_event_id.clone(),
-                                        enforce_thread: EnforceThread::Threaded(ReplyWithinThread::No),
-                                    },
-                                );
+                                        enforce_thread: EnforceThread::Threaded(
+                                            ReplyWithinThread::No,
+                                        ),
+                                    });
                                 submit_async_request(MatrixRequest::SendMessage {
                                     timeline_kind: room_screen_props.timeline_kind.clone(),
                                     message: RoomMessageEventContent::text_markdown(text),
@@ -452,21 +507,25 @@ impl RoomInputBar {
                 }
             }
 
-            if let Some(BotfatherAction::StreamFailed { room_id, error, thread_root_event_id }) = action.downcast_ref() {
+            if let Some(BotfatherAction::StreamFailed {
+                room_id,
+                error,
+                thread_root_event_id,
+            }) = action.downcast_ref()
+            {
                 let current_thread_root_event_id = room_screen_props
                     .timeline_kind
                     .thread_root_event_id()
                     .map(|event_id| event_id.to_string());
-                let same_scope = current_thread_root_event_id.as_ref() == thread_root_event_id.as_ref();
+                let same_scope =
+                    current_thread_root_event_id.as_ref() == thread_root_event_id.as_ref();
                 if room_screen_props.timeline_kind.room_id().as_str() == room_id && same_scope {
-                    let fallback_text = botfather::room_stream_preview(
-                        room_id,
-                        thread_root_event_id.as_deref(),
-                    )
-                    .map(|preview| preview.text)
-                    .filter(|text| !text.trim().is_empty())
-                    .map(|text| format!("{text}\n\nBot request failed: {error}"))
-                    .or_else(|| Some(format!("Bot request failed: {error}")));
+                    let fallback_text =
+                        botfather::room_stream_preview(room_id, thread_root_event_id.as_deref())
+                            .map(|preview| preview.text)
+                            .filter(|text| !text.trim().is_empty())
+                            .map(|text| format!("{text}\n\nBot request failed: {error}"))
+                            .or_else(|| Some(format!("Bot request failed: {error}")));
                     match botfather::cancel_direct_stream_message(
                         room_id,
                         thread_root_event_id.as_deref(),
@@ -474,24 +533,31 @@ impl RoomInputBar {
                     ) {
                         botfather::DirectStreamHandleState::Ready(send_handle) => {
                             let fallback_text = botfather::room_stream_preview(
-                            room_id,
-                            thread_root_event_id.as_deref(),
-                        )
-                        .map(|preview| preview.text)
-                        .filter(|text| !text.trim().is_empty())
-                        .map(|text| format!("{text}\n\nBot request failed: {error}"))
-                        .unwrap_or_else(|| format!("Bot request failed: {error}"));
+                                room_id,
+                                thread_root_event_id.as_deref(),
+                            )
+                            .map(|preview| preview.text)
+                            .filter(|text| !text.trim().is_empty())
+                            .map(|text| format!("{text}\n\nBot request failed: {error}"))
+                            .unwrap_or_else(|| format!("Bot request failed: {error}"));
                             let error_message = error.clone();
                             spawn_on_tokio(async move {
                                 match send_handle.abort().await {
                                     Ok(true) => {}
                                     Ok(false) => {
                                         if let Err(edit_error) = send_handle
-                                            .edit(RoomMessageEventContent::text_markdown(fallback_text).into())
+                                            .edit(
+                                                RoomMessageEventContent::text_markdown(
+                                                    fallback_text,
+                                                )
+                                                .into(),
+                                            )
                                             .await
                                         {
                                             enqueue_popup_notification(
-                                                format!("Failed to update bot stream failure state: {edit_error}"),
+                                                format!(
+                                                    "Failed to update bot stream failure state: {edit_error}"
+                                                ),
                                                 PopupKind::Error,
                                                 Some(5.0),
                                             );
@@ -518,20 +584,23 @@ impl RoomInputBar {
                 }
             }
 
-            if let Some(BotfatherAction::StreamCancelled { room_id, thread_root_event_id }) = action.downcast_ref() {
+            if let Some(BotfatherAction::StreamCancelled {
+                room_id,
+                thread_root_event_id,
+            }) = action.downcast_ref()
+            {
                 let current_thread_root_event_id = room_screen_props
                     .timeline_kind
                     .thread_root_event_id()
                     .map(|event_id| event_id.to_string());
-                let same_scope = current_thread_root_event_id.as_ref() == thread_root_event_id.as_ref();
+                let same_scope =
+                    current_thread_root_event_id.as_ref() == thread_root_event_id.as_ref();
                 if room_screen_props.timeline_kind.room_id().as_str() == room_id && same_scope {
-                    let fallback_text = botfather::room_stream_preview(
-                        room_id,
-                        thread_root_event_id.as_deref(),
-                    )
-                    .map(|preview| preview.text)
-                    .filter(|text| !text.trim().is_empty())
-                    .map(|text| format!("{text}\n\nBot request cancelled."));
+                    let fallback_text =
+                        botfather::room_stream_preview(room_id, thread_root_event_id.as_deref())
+                            .map(|preview| preview.text)
+                            .filter(|text| !text.trim().is_empty())
+                            .map(|text| format!("{text}\n\nBot request cancelled."));
                     match botfather::cancel_direct_stream_message(
                         room_id,
                         thread_root_event_id.as_deref(),
@@ -539,23 +608,30 @@ impl RoomInputBar {
                     ) {
                         botfather::DirectStreamHandleState::Ready(send_handle) => {
                             let fallback_text = botfather::room_stream_preview(
-                            room_id,
-                            thread_root_event_id.as_deref(),
-                        )
-                        .map(|preview| preview.text)
-                        .filter(|text| !text.trim().is_empty())
-                        .map(|text| format!("{text}\n\nBot request cancelled."))
-                        .unwrap_or_else(|| "Bot request cancelled.".into());
+                                room_id,
+                                thread_root_event_id.as_deref(),
+                            )
+                            .map(|preview| preview.text)
+                            .filter(|text| !text.trim().is_empty())
+                            .map(|text| format!("{text}\n\nBot request cancelled."))
+                            .unwrap_or_else(|| "Bot request cancelled.".into());
                             spawn_on_tokio(async move {
                                 match send_handle.abort().await {
                                     Ok(true) => {}
                                     Ok(false) => {
                                         if let Err(error) = send_handle
-                                            .edit(RoomMessageEventContent::text_markdown(fallback_text).into())
+                                            .edit(
+                                                RoomMessageEventContent::text_markdown(
+                                                    fallback_text,
+                                                )
+                                                .into(),
+                                            )
                                             .await
                                         {
                                             enqueue_popup_notification(
-                                                format!("Failed to update cancelled bot stream message: {error}"),
+                                                format!(
+                                                    "Failed to update cancelled bot stream message: {error}"
+                                                ),
                                                 PopupKind::Error,
                                                 Some(5.0),
                                             );
@@ -676,7 +752,9 @@ impl RoomInputBar {
                         .is_none()
                     {
                         self.replying_to.as_ref().and_then(|(event_tl_item, _)| {
-                            event_tl_item.event_id().map(|event_id| event_id.to_string())
+                            event_tl_item
+                                .event_id()
+                                .map(|event_id| event_id.to_string())
                         })
                     } else {
                         None

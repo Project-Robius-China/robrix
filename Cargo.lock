@@ -2877,7 +2877,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.53.4",
 ]
 
 [[package]]
@@ -5006,7 +5006,7 @@ dependencies = [
 [[package]]
 name = "robrix-botfather"
 version = "0.1.0"
-source = "git+https://github.com/Project-Robius-China/robrix-botfather.git#fdff51185e512b47b81c2e9dbdee6512757fdec6"
+source = "git+https://github.com/Project-Robius-China/robrix-botfather.git#5cf11b71b9b95a82dc7f6cec9e3fb0069f0ff96b"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -7124,7 +7124,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.1",
 ]
 
 [[package]]

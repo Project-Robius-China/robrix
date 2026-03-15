@@ -1,13 +1,17 @@
+use std::cell::RefCell;
+
 use makepad_widgets::*;
 use matrix_sdk::room::reply::{EnforceThread, Reply};
 use ruma::events::room::message::{ReplyWithinThread, RoomMessageEventContent};
 
 use crate::{
+    app::PositiveConfirmationModalAction,
     botfather::{self, BotfatherAction},
     home::room_screen::RoomScreenProps,
     login::login_screen::LoginAction,
     logout::logout_confirm_modal::LogoutAction,
-    sliding_sync::{submit_async_request, MatrixRequest},
+    shared::confirmation_modal::ConfirmationModalContent,
+    sliding_sync::{MatrixRequest, spawn_on_tokio, submit_async_request},
 };
 
 live_design! {
@@ -98,7 +102,7 @@ live_design! {
                 text_style: <REGULAR_TEXT>{font_size: 10.5}
                 color: (COLOR_TEXT)
             }
-            text: "This panel manages the room's active bot binding. Pick the room bot from the dropdown below, then click Bind Room to apply it. If both runtimes are available and you have not overridden the room, Crew still wins by default."
+            text: "This panel manages the room's active bot and sender binding. Pick the room bot and sender below, then click Bind Room to apply them. If both runtimes are available and you have not overridden the room, Crew still wins by default."
         }
 
         binding_summary_label = <Label> {
@@ -122,6 +126,20 @@ live_design! {
             }
 
             bot_selector_dropdown = <BotSelectorDropDown> {}
+        }
+
+        <View> {
+            width: Fill, height: Fit
+            flow: Down
+            spacing: 8
+
+            <SubsectionLabel> {
+                text: "Room Sender"
+            }
+
+            sender_selector_dropdown = <BotSelectorDropDown> {
+                labels: ["Current User"]
+            }
         }
 
         <View> {
@@ -268,6 +286,10 @@ pub struct BotfatherRoomPanel {
     #[rust]
     selected_bot_id: Option<String>,
     #[rust]
+    sender_choice_ids: Vec<String>,
+    #[rust]
+    selected_sender_profile_id: Option<String>,
+    #[rust]
     rendered_room_id: Option<String>,
 }
 
@@ -296,6 +318,7 @@ impl Widget for BotfatherRoomPanel {
         if let Event::Actions(actions) = event {
             let current_room_id = current_room_id(scope);
             let bot_selector_dropdown = self.drop_down(ids!(bot_selector_dropdown));
+            let sender_selector_dropdown = self.drop_down(ids!(sender_selector_dropdown));
             let bind_room_button = self.view.button(ids!(bind_room_button));
             let unbind_room_button = self.view.button(ids!(unbind_room_button));
             let post_preview_button = self.view.button(ids!(post_preview_button));
@@ -317,23 +340,97 @@ impl Widget for BotfatherRoomPanel {
                 }
             }
 
+            if let Some(selected_index) = sender_selector_dropdown.selected(actions) {
+                if let Some(sender_profile_id) = self.sender_choice_ids.get(selected_index).cloned()
+                {
+                    self.selected_sender_profile_id = Some(sender_profile_id.clone());
+                    self.set_status(
+                        cx,
+                        &format!(
+                            "Selected sender \"{sender_profile_id}\". Click Bind Room to apply it."
+                        ),
+                    );
+                }
+            }
+
             if bind_room_button.clicked(actions) {
-                match (current_room_id.as_deref(), self.selected_bot_id.as_deref()) {
-                    (Some(room_id), Some(bot_id)) => match botfather::bind_room_to_bot(room_id, bot_id) {
-                        Ok(message) => {
-                            self.refresh_room_state(cx, current_room_id.clone());
-                            self.sync_selected_bot(cx, current_room_id.as_deref());
-                            self.rendered_room_id = current_room_id.clone();
-                            self.refresh_stream_preview(cx, scope);
-                            self.set_status(cx, &message);
+                match (
+                    current_room_id.as_deref(),
+                    self.selected_bot_id.as_deref(),
+                    self.selected_sender_profile_id.as_deref(),
+                ) {
+                    (Some(room_id), Some(bot_id), sender_profile_id) => {
+                        let selected_sender =
+                            sender_profile_id.and_then(botfather::sender_profile_option);
+                        let switching_to_shared = botfather::room_is_personal_assist(room_id)
+                            && selected_sender.as_ref().is_some_and(|option| {
+                                !matches!(
+                                    option.kind,
+                                    robrix_botfather::SenderProfileKind::CurrentUser
+                                )
+                            });
+
+                        if let Some(selected_sender_id) = sender_profile_id {
+                            if !botfather::sender_profile_is_ready(selected_sender_id) {
+                                let guidance =
+                                    botfather::sender_profile_setup_guidance(selected_sender_id);
+                                cx.action(PositiveConfirmationModalAction::Show(RefCell::new(
+                                    Some(ConfirmationModalContent {
+                                        title_text: "Independent Bot Account Required".into(),
+                                        body_text: guidance.clone().into(),
+                                        accept_button_text: Some("Understood".into()),
+                                        cancel_button_text: Some("Close".into()),
+                                        ..Default::default()
+                                    }),
+                                )));
+                                self.set_status(cx, &guidance);
+                                return;
+                            }
                         }
-                        Err(error) => self.set_status(cx, &error),
-                    },
-                    (Some(_), None) => self.set_status(
+
+                        if switching_to_shared {
+                            let room_id = room_id.to_string();
+                            let bot_id = bot_id.to_string();
+                            let sender_profile_id = sender_profile_id.map(ToOwned::to_owned);
+                            cx.action(PositiveConfirmationModalAction::Show(RefCell::new(
+                                Some(ConfirmationModalContent {
+                                    title_text: "Switch Room to Shared Bot Mode".into(),
+                                    body_text: "This room is currently using your own Matrix account as a personal assistant. Switching to a shared bot sender separates bot output from your account, makes attribution clear for everyone in the room, and gives higher-security rooms an isolated sender boundary.".into(),
+                                    accept_button_text: Some("Switch Room".into()),
+                                    cancel_button_text: Some("Keep Personal".into()),
+                                    on_accept_clicked: Some(Box::new(move |_cx| {
+                                        let status = bind_room_and_emit_status(
+                                            &room_id,
+                                            &bot_id,
+                                            sender_profile_id.as_deref(),
+                                        );
+                                        Cx::post_action(BotfatherAction::Status(status));
+                                    })),
+                                    ..Default::default()
+                                }),
+                            )));
+                            self.set_status(
+                                cx,
+                                "Confirm the sender switch to move this room from personal assist to shared bot mode.",
+                            );
+                            return;
+                        }
+
+                        let message = bind_room_and_emit_status(room_id, bot_id, sender_profile_id);
+                        self.refresh_room_state(cx, current_room_id.clone());
+                        self.sync_selected_bot(cx, current_room_id.as_deref());
+                        self.sync_selected_sender(cx, current_room_id.as_deref());
+                        self.rendered_room_id = current_room_id.clone();
+                        self.refresh_stream_preview(cx, scope);
+                        self.set_status(cx, &message);
+                    }
+                    (Some(_), None, _) => self.set_status(
                         cx,
                         "Pick a bot from the Room Bot dropdown before binding the room.",
                     ),
-                    (None, _) => self.set_status(cx, "This room is not ready for BotFather yet."),
+                    (None, _, _) => {
+                        self.set_status(cx, "This room is not ready for BotFather yet.")
+                    }
                 }
             }
 
@@ -343,6 +440,7 @@ impl Widget for BotfatherRoomPanel {
                         Ok(()) => {
                             self.refresh_room_state(cx, current_room_id.clone());
                             self.sync_selected_bot(cx, current_room_id.as_deref());
+                            self.sync_selected_sender(cx, current_room_id.as_deref());
                             self.rendered_room_id = current_room_id.clone();
                             self.refresh_stream_preview(cx, scope);
                             self.set_status(cx, "Removed the room-level bot override.");
@@ -360,31 +458,70 @@ impl Widget for BotfatherRoomPanel {
                             .timeline_kind
                             .thread_root_event_id()
                             .map(|event_id| event_id.to_string());
-                        match botfather::take_room_stream_preview_text(
+                        match botfather::room_stream_preview(
                             room_props.room_name_id.room_id().as_str(),
                             thread_root_event_id.as_deref(),
-                        ) {
+                        )
+                        .map(|preview| preview.text)
+                        .filter(|text| !text.trim().is_empty())
+                        {
                             Some(text) => {
-                                let replied_to = room_props.timeline_kind.thread_root_event_id().map(
-                                    |thread_root_event_id| Reply {
-                                        event_id: thread_root_event_id.clone(),
-                                        enforce_thread: EnforceThread::Threaded(
-                                            ReplyWithinThread::No,
-                                        ),
-                                    },
-                                );
-                                submit_async_request(MatrixRequest::SendMessage {
-                                    timeline_kind: room_props.timeline_kind.clone(),
-                                    message: RoomMessageEventContent::text_markdown(text),
-                                    replied_to,
-                                    bot_prompt: None,
-                                    bot_dispatch_context: None,
-                                    bot_stream_placeholder_context: None,
-                                    #[cfg(feature = "tsp")]
-                                    sign_with_tsp: false,
-                                });
-                                self.refresh_stream_preview(cx, scope);
-                                self.set_status(cx, "Posted the bot preview to Matrix.");
+                                if botfather::room_uses_current_user_sender(
+                                    room_props.room_name_id.room_id().as_str(),
+                                ) {
+                                    let replied_to = room_props
+                                        .timeline_kind
+                                        .thread_root_event_id()
+                                        .map(|thread_root_event_id| Reply {
+                                            event_id: thread_root_event_id.clone(),
+                                            enforce_thread: EnforceThread::Threaded(
+                                                ReplyWithinThread::No,
+                                            ),
+                                        });
+                                    submit_async_request(MatrixRequest::SendMessage {
+                                        timeline_kind: room_props.timeline_kind.clone(),
+                                        message: RoomMessageEventContent::text_markdown(text),
+                                        replied_to,
+                                        bot_prompt: None,
+                                        bot_dispatch_context: None,
+                                        bot_stream_placeholder_context: None,
+                                        #[cfg(feature = "tsp")]
+                                        sign_with_tsp: false,
+                                    });
+                                    botfather::clear_room_stream_preview(
+                                        room_props.room_name_id.room_id().as_str(),
+                                        thread_root_event_id.as_deref(),
+                                    );
+                                    self.refresh_stream_preview(cx, scope);
+                                    self.set_status(cx, "Posted the bot preview to Matrix.");
+                                } else {
+                                    let room_id = room_props.room_name_id.room_id().to_string();
+                                    let thread_root_event_id = thread_root_event_id.clone();
+                                    self.set_status(
+                                        cx,
+                                        "Posting bot preview via the resolved sender...",
+                                    );
+                                    spawn_on_tokio(async move {
+                                        let status =
+                                            match botfather::post_markdown_via_resolved_sender(
+                                                &room_id,
+                                                thread_root_event_id.as_deref(),
+                                                text,
+                                            )
+                                            .await
+                                            {
+                                                Ok(message) => {
+                                                    botfather::clear_room_stream_preview(
+                                                        &room_id,
+                                                        thread_root_event_id.as_deref(),
+                                                    );
+                                                    message
+                                                }
+                                                Err(error) => error,
+                                            };
+                                        Cx::post_action(BotfatherAction::Status(status));
+                                    });
+                                }
                             }
                             None => self.set_status(
                                 cx,
@@ -440,6 +577,7 @@ impl Widget for BotfatherRoomPanel {
                     self.apply_preview_visibility(cx);
                     self.refresh_room_state(cx, current_room_id.clone());
                     self.sync_selected_bot(cx, current_room_id.as_deref());
+                    self.sync_selected_sender(cx, current_room_id.as_deref());
                     self.rendered_room_id = current_room_id.clone();
                     self.refresh_stream_preview(cx, scope);
                     continue;
@@ -492,6 +630,7 @@ impl BotfatherRoomPanel {
                     .label(ids!(binding_summary_label))
                     .set_text(cx, &botfather::describe_room_binding(&room_id));
                 self.update_bot_selector(cx, Some(room_id.as_str()));
+                self.update_sender_selector(cx, Some(room_id.as_str()));
             }
             None => {
                 self.view.label(ids!(binding_summary_label)).set_text(
@@ -499,6 +638,7 @@ impl BotfatherRoomPanel {
                     "This room is not ready yet. Open it again after Robrix finishes loading.",
                 );
                 self.update_bot_selector(cx, None);
+                self.update_sender_selector(cx, None);
                 self.clear_preview(cx);
             }
         }
@@ -510,8 +650,10 @@ impl BotfatherRoomPanel {
             .set_text(cx, "No bot binding resolved yet.");
         self.view.label(ids!(status_label)).set_text(cx, "");
         self.selected_bot_id = None;
+        self.selected_sender_profile_id = None;
         self.rendered_room_id = None;
         self.update_bot_selector(cx, None);
+        self.update_sender_selector(cx, None);
         self.clear_preview(cx);
     }
 
@@ -560,6 +702,42 @@ impl BotfatherRoomPanel {
         dropdown.set_selected_item(cx, selected_index);
     }
 
+    fn update_sender_selector(&mut self, cx: &mut Cx, room_id: Option<&str>) {
+        let dropdown = self.drop_down(ids!(sender_selector_dropdown));
+        let options = botfather::sender_profile_options();
+
+        if options.is_empty() {
+            self.sender_choice_ids.clear();
+            self.selected_sender_profile_id = None;
+            dropdown.set_labels(cx, vec!["No senders configured".to_string()]);
+            dropdown.set_selected_item(cx, 0);
+            return;
+        }
+
+        self.sender_choice_ids = options
+            .iter()
+            .map(|option| option.sender_profile_id.clone())
+            .collect();
+        dropdown.set_labels(
+            cx,
+            options
+                .iter()
+                .map(|option| option.label.clone())
+                .collect::<Vec<_>>(),
+        );
+
+        let selected_index = room_id
+            .and_then(botfather::room_primary_sender_profile_id)
+            .and_then(|sender_profile_id| {
+                self.sender_choice_ids
+                    .iter()
+                    .position(|candidate| candidate == &sender_profile_id)
+            })
+            .unwrap_or(0);
+        self.selected_sender_profile_id = self.sender_choice_ids.get(selected_index).cloned();
+        dropdown.set_selected_item(cx, selected_index);
+    }
+
     fn sync_selected_bot(&mut self, cx: &mut Cx, room_id: Option<&str>) {
         let Some(room_id) = room_id else {
             return;
@@ -577,6 +755,27 @@ impl BotfatherRoomPanel {
         {
             self.selected_bot_id = Some(bot_id);
             self.drop_down(ids!(bot_selector_dropdown))
+                .set_selected_item(cx, selected_index);
+        }
+    }
+
+    fn sync_selected_sender(&mut self, cx: &mut Cx, room_id: Option<&str>) {
+        let Some(room_id) = room_id else {
+            return;
+        };
+        let Some(sender_profile_id) = botfather::room_primary_sender_profile_id(room_id) else {
+            self.selected_sender_profile_id = self.sender_choice_ids.first().cloned();
+            self.drop_down(ids!(sender_selector_dropdown))
+                .set_selected_item(cx, 0);
+            return;
+        };
+        if let Some(selected_index) = self
+            .sender_choice_ids
+            .iter()
+            .position(|candidate| candidate == &sender_profile_id)
+        {
+            self.selected_sender_profile_id = Some(sender_profile_id);
+            self.drop_down(ids!(sender_selector_dropdown))
                 .set_selected_item(cx, selected_index);
         }
     }
@@ -641,8 +840,12 @@ impl BotfatherRoomPanel {
             .label(ids!(preview_status_label))
             .set_text(cx, "No streamed preview yet.");
         self.view.label(ids!(preview_body_label)).set_text(cx, "");
-        self.view.button(ids!(post_preview_button)).set_enabled(cx, false);
-        self.view.button(ids!(clear_preview_button)).set_enabled(cx, false);
+        self.view
+            .button(ids!(post_preview_button))
+            .set_enabled(cx, false);
+        self.view
+            .button(ids!(clear_preview_button))
+            .set_enabled(cx, false);
     }
 
     fn apply_preview_visibility(&mut self, cx: &mut Cx) {
@@ -659,4 +862,15 @@ fn current_room_id(scope: &mut Scope) -> Option<String> {
         .props
         .get::<RoomScreenProps>()
         .map(|props| props.room_name_id.room_id().to_string())
+}
+
+fn bind_room_and_emit_status(
+    room_id: &str,
+    bot_id: &str,
+    sender_profile_id: Option<&str>,
+) -> String {
+    match botfather::bind_room_to_bot_and_sender(room_id, bot_id, sender_profile_id) {
+        Ok(message) => message,
+        Err(error) => error,
+    }
 }

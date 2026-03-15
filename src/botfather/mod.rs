@@ -5,6 +5,7 @@ use std::{
         Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::StreamExt;
@@ -14,9 +15,9 @@ use robrix_botfather::{
     BindingSource, BotBinding, BotDefinition, BotEvent, BotRuntime, BotRuntimeOverride,
     BotfatherDefaults, BotfatherManager, BotfatherState, DeliveryTarget, DispatchPolicy,
     InventorySnapshot, OpenClawRuntimeConfig, PermissionPolicy, ResolveError, RoomInventory,
-    RuntimeConfig, RuntimeKind, RuntimeProfile, SpaceInventory, StateStore, TriggerMode,
-    TriggerPolicy, UserSnapshot, Workspace,
-    resolve_room_bot, resolve_room_bots, runtime_feature_enabled,
+    RuntimeConfig, RuntimeKind, RuntimeProfile, SenderProfile, SenderProfileKind,
+    SenderSecurityLevel, SpaceInventory, StateStore, TriggerMode, TriggerPolicy, UserSnapshot,
+    Workspace, resolve_room_bot, resolve_room_bots, runtime_feature_enabled,
 };
 
 use crate::{
@@ -28,12 +29,16 @@ use crate::{
 use tokio::task::JoinHandle;
 
 pub mod commands;
+pub mod sender;
 
 const DEFAULT_WORKSPACE_ID: &str = "default-botfather-workspace";
 const DEFAULT_CREW_RUNTIME_ID: &str = "default-crew-runtime";
 const DEFAULT_OPENCLAW_RUNTIME_ID: &str = "default-openclaw-runtime";
 const DEFAULT_CREW_BOT_ID: &str = "default-crew-bot";
 const DEFAULT_OPENCLAW_BOT_ID: &str = "default-openclaw-bot";
+const DEFAULT_CURRENT_USER_SENDER_ID: &str = "current-user";
+const DEFAULT_SHARED_BOT_SENDER_ID: &str = "shared-bot-sender";
+const DEFAULT_SECURE_BOT_SENDER_ID: &str = "secure-room-bot-sender";
 
 static BRIDGE_CONTEXT: Mutex<Option<BridgeContext>> = Mutex::new(None);
 static ACTIVE_STREAMS: Mutex<Vec<ActiveBotStream>> = Mutex::new(Vec::new());
@@ -113,6 +118,14 @@ pub struct DefaultConfigForm {
     pub openclaw_gateway_url: String,
     pub openclaw_auth_token_env: String,
     pub workspace_root: String,
+    pub shared_sender_homeserver: String,
+    pub shared_sender_user_id: String,
+    pub shared_sender_device_id: String,
+    pub shared_sender_access_token_env: String,
+    pub secure_sender_homeserver: String,
+    pub secure_sender_user_id: String,
+    pub secure_sender_device_id: String,
+    pub secure_sender_access_token_env: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,6 +133,29 @@ pub struct RoomBotOption {
     pub bot_id: String,
     pub label: String,
     pub runtime_kind: RuntimeKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SenderOption {
+    pub sender_profile_id: String,
+    pub label: String,
+    pub kind: SenderProfileKind,
+    pub security: SenderSecurityLevel,
+    pub ready: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExplicitRoomBindingEntry {
+    pub room_id: String,
+    pub room_name: String,
+    pub mode: String,
+    pub source: String,
+    pub bot_name: String,
+    pub sender_name: String,
+    pub sender_profile_id: String,
+    pub sender_security: String,
+    pub sender_ready: bool,
+    pub runtime: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -231,6 +267,7 @@ pub fn ensure_loaded_for_current_user() -> Result<(), String> {
     let store = StateStore::in_dir(bridge_state_dir(&user_id));
     let mut state = store.load_or_default().map_err(|error| error.to_string())?;
     state.user = current_user_snapshot(&user_id);
+    sync_builtin_sender_profiles(&mut state);
     *guard = Some(BridgeContext {
         user_id: user_id_str,
         store,
@@ -244,6 +281,8 @@ pub fn default_config_form() -> DefaultConfigForm {
         let crew_runtime = state.runtime_profiles.get(DEFAULT_CREW_RUNTIME_ID);
         let openclaw_runtime = state.runtime_profiles.get(DEFAULT_OPENCLAW_RUNTIME_ID);
         let workspace = state.workspaces.get(DEFAULT_WORKSPACE_ID);
+        let shared_sender = state.sender_profiles.get(DEFAULT_SHARED_BOT_SENDER_ID);
+        let secure_sender = state.sender_profiles.get(DEFAULT_SECURE_BOT_SENDER_ID);
 
         let (crew_endpoint, crew_auth_token_env) = match crew_runtime.map(|runtime| &runtime.config)
         {
@@ -272,6 +311,14 @@ pub fn default_config_form() -> DefaultConfigForm {
             workspace_root: workspace
                 .map(|workspace| workspace.root_dir.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            shared_sender_homeserver: sender_homeserver(shared_sender),
+            shared_sender_user_id: sender_user_id(shared_sender),
+            shared_sender_device_id: sender_device_id(shared_sender),
+            shared_sender_access_token_env: sender_access_token_env(shared_sender),
+            secure_sender_homeserver: sender_homeserver(secure_sender),
+            secure_sender_user_id: sender_user_id(secure_sender),
+            secure_sender_device_id: sender_device_id(secure_sender),
+            secure_sender_access_token_env: sender_access_token_env(secure_sender),
         }
     })
 }
@@ -345,6 +392,14 @@ pub fn save_default_profiles(
     openclaw_gateway_url: &str,
     openclaw_auth_token_env: &str,
     workspace_root: &str,
+    shared_sender_homeserver: &str,
+    shared_sender_user_id: &str,
+    shared_sender_device_id: &str,
+    shared_sender_access_token_env: &str,
+    secure_sender_homeserver: &str,
+    secure_sender_user_id: &str,
+    secure_sender_device_id: &str,
+    secure_sender_access_token_env: &str,
 ) -> Result<(), String> {
     ensure_loaded_for_current_user()?;
 
@@ -361,6 +416,7 @@ pub fn save_default_profiles(
     }
 
     with_context_mut(|ctx| {
+        sync_builtin_sender_profiles(&mut ctx.state);
         let workspace_id = match non_empty(workspace_root) {
             Some(workspace_root) => {
                 let root_dir = PathBuf::from(&workspace_root);
@@ -416,6 +472,7 @@ pub fn save_default_profiles(
                     id: DEFAULT_CREW_BOT_ID.to_string(),
                     name: "Crew".into(),
                     runtime_profile_id: DEFAULT_CREW_RUNTIME_ID.to_string(),
+                    default_sender_profile_id: Some(DEFAULT_CURRENT_USER_SENDER_ID.to_string()),
                     priority: 10,
                     enabled: true,
                     trigger: TriggerPolicy {
@@ -458,6 +515,7 @@ pub fn save_default_profiles(
                     id: DEFAULT_OPENCLAW_BOT_ID.to_string(),
                     name: "OpenClaw".into(),
                     runtime_profile_id: DEFAULT_OPENCLAW_RUNTIME_ID.to_string(),
+                    default_sender_profile_id: Some(DEFAULT_CURRENT_USER_SENDER_ID.to_string()),
                     priority: 0,
                     enabled: true,
                     trigger: TriggerPolicy {
@@ -476,8 +534,32 @@ pub fn save_default_profiles(
             );
         }
 
+        upsert_optional_sender_profile(
+            &mut ctx.state,
+            DEFAULT_SHARED_BOT_SENDER_ID,
+            "Shared Bot Sender",
+            SenderSecurityLevel::Standard,
+            shared_sender_homeserver,
+            shared_sender_user_id,
+            shared_sender_device_id,
+            shared_sender_access_token_env,
+            "Shared Matrix bot sender used across standard rooms.",
+        );
+        upsert_optional_sender_profile(
+            &mut ctx.state,
+            DEFAULT_SECURE_BOT_SENDER_ID,
+            "Secure Room Sender",
+            SenderSecurityLevel::Isolated,
+            secure_sender_homeserver,
+            secure_sender_user_id,
+            secure_sender_device_id,
+            secure_sender_access_token_env,
+            "Isolated Matrix bot sender intended for higher-security rooms.",
+        );
+
         ctx.state.defaults = BotfatherDefaults {
             bot_ids: default_bot_ids(&ctx.state),
+            default_sender_profile_id: Some(DEFAULT_CURRENT_USER_SENDER_ID.to_string()),
             room_stream_preview_enabled: ctx.state.defaults.room_stream_preview_enabled,
         };
         cleanup_orphan_bindings(&mut ctx.state);
@@ -515,14 +597,22 @@ pub fn runtime_summary(runtime_kind: RuntimeKind) -> String {
                 model.as_deref().unwrap_or("(default)"),
                 system_prompt
                     .as_ref()
-                    .map(|prompt| if prompt.is_empty() { "(cleared)" } else { "(custom)" })
+                    .map(|prompt| if prompt.is_empty() {
+                        "(cleared)"
+                    } else {
+                        "(custom)"
+                    })
                     .unwrap_or("(default)")
             ),
             api_key_env.as_deref().unwrap_or("(none)").to_string(),
         ),
         RuntimeConfig::OpenClaw(config) => (
             format!("{}\nagent: {}", config.gateway_url, config.agent_id),
-            config.auth_token_env.as_deref().unwrap_or("(none)").to_string(),
+            config
+                .auth_token_env
+                .as_deref()
+                .unwrap_or("(none)")
+                .to_string(),
         ),
     };
     let workspace = profile
@@ -571,11 +661,18 @@ pub fn bots_overview() -> String {
             .values()
             .filter(|bindings| bindings.iter().any(|binding| binding.bot_id == bot.id))
             .count();
+        let sender_label = bot
+            .default_sender_profile_id
+            .as_deref()
+            .and_then(|sender_id| state.sender_profiles.get(sender_id))
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| "(default sender missing)".into());
         lines.push(format!(
-            "- {} [{}] -> {} | rooms: {} | override: {}",
+            "- {} [{}] -> {} | sender: {} | rooms: {} | override: {}",
             bot.id,
             runtime_label,
             bot.runtime_profile_id,
+            sender_label,
             room_bindings,
             bot_override_summary(&bot.runtime_override),
         ));
@@ -602,6 +699,28 @@ pub fn workspace_overview() -> String {
     )
 }
 
+pub fn sender_profiles_overview() -> String {
+    let Some(state) = snapshot() else {
+        return "BotFather state is not loaded.".into();
+    };
+
+    if state.sender_profiles.is_empty() {
+        return "No sender profiles are configured yet.".into();
+    }
+
+    let mut lines = Vec::new();
+    for profile in state.sender_profiles.values() {
+        lines.push(format!(
+            "- {} [{} / {}] -> {}",
+            profile.name,
+            sender_kind_label(profile.kind),
+            sender_security_label(profile.security),
+            sender_profile_target_summary(profile),
+        ));
+    }
+    lines.join("\n")
+}
+
 pub fn status_overview(room_id: Option<&str>) -> String {
     let Some(state) = snapshot() else {
         return "BotFather state is not loaded.".into();
@@ -610,17 +729,25 @@ pub fn status_overview(room_id: Option<&str>) -> String {
     let mut lines = vec![
         format!("bots: {}", state.bots.len()),
         format!("runtime profiles: {}", state.runtime_profiles.len()),
+        format!("sender profiles: {}", state.sender_profiles.len()),
         format!("room overrides: {}", state.room_bindings.len()),
-        format!("active bot streams: {}", ACTIVE_STREAMS.lock().unwrap().len()),
-        format!("queued bot streams: {}", QUEUED_STREAMS.lock().unwrap().len()),
+        format!(
+            "active bot streams: {}",
+            ACTIVE_STREAMS.lock().unwrap().len()
+        ),
+        format!(
+            "queued bot streams: {}",
+            QUEUED_STREAMS.lock().unwrap().len()
+        ),
     ];
 
     if let Some(room_id) = room_id {
         match resolve_room_bot(&state, room_id, None) {
             Ok(resolved) => lines.push(format!(
-                "current room -> {} ({})",
+                "current room -> {} ({}) via {}",
                 resolved.bot.id,
                 runtime_kind_label(resolved.runtime_kind()),
+                resolved.sender_profile.name,
             )),
             Err(error) => lines.push(describe_resolve_error(error)),
         }
@@ -645,7 +772,7 @@ pub fn diagnostics_overview() -> String {
     let active_len = ACTIVE_STREAMS.lock().unwrap().len();
 
     format!(
-        "state file: {}\nstate version: {}\nrooms: {}\nspaces: {}\nactive sessions: {}\nactive streams: {}\nqueued streams: {}\npreview buffers: {}\npreview mode: {}\ndefault bots: {}",
+        "state file: {}\nstate version: {}\nrooms: {}\nspaces: {}\nactive sessions: {}\nactive streams: {}\nqueued streams: {}\npreview buffers: {}\npreview mode: {}\ndefault bots: {}\ndefault sender: {}",
         state_path,
         state.version,
         state.inventory.rooms.len(),
@@ -660,6 +787,11 @@ pub fn diagnostics_overview() -> String {
             "auto-send"
         },
         state.defaults.bot_ids.join(", "),
+        state
+            .defaults
+            .default_sender_profile_id
+            .as_deref()
+            .unwrap_or("(none)"),
     )
 }
 
@@ -726,13 +858,12 @@ pub fn attach_direct_stream_message_handle(
     }
 }
 
-pub fn has_live_direct_stream_message(
-    room_id: &str,
-    thread_root_event_id: Option<&str>,
-) -> bool {
-    DIRECT_STREAM_MESSAGES.lock().unwrap().iter().any(|message| {
-        direct_stream_scope_matches(message, room_id, thread_root_event_id)
-    })
+pub fn has_live_direct_stream_message(room_id: &str, thread_root_event_id: Option<&str>) -> bool {
+    DIRECT_STREAM_MESSAGES
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|message| direct_stream_scope_matches(message, room_id, thread_root_event_id))
 }
 
 pub fn is_live_direct_stream_placeholder(
@@ -743,10 +874,14 @@ pub fn is_live_direct_stream_placeholder(
     let Some(placeholder_token) = placeholder_token else {
         return false;
     };
-    DIRECT_STREAM_MESSAGES.lock().unwrap().iter().any(|message| {
-        direct_stream_scope_matches(message, room_id, thread_root_event_id)
-            && message.placeholder_token == placeholder_token
-    })
+    DIRECT_STREAM_MESSAGES
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|message| {
+            direct_stream_scope_matches(message, room_id, thread_root_event_id)
+                && message.placeholder_token == placeholder_token
+        })
 }
 
 pub fn finalize_direct_stream_message(
@@ -773,10 +908,7 @@ pub fn cancel_direct_stream_message(
     )
 }
 
-pub fn clear_direct_stream_message(
-    room_id: &str,
-    thread_root_event_id: Option<&str>,
-) -> bool {
+pub fn clear_direct_stream_message(room_id: &str, thread_root_event_id: Option<&str>) -> bool {
     let mut messages = DIRECT_STREAM_MESSAGES.lock().unwrap();
     let Some(index) = messages
         .iter()
@@ -803,9 +935,11 @@ pub fn prune_terminal_direct_stream_messages(
             return true;
         }
 
-        present_thread_root_event_ids.iter().any(|thread_root_event_id| {
-            thread_root_event_id.as_deref() == message.thread_root_event_id.as_deref()
-        })
+        present_thread_root_event_ids
+            .iter()
+            .any(|thread_root_event_id| {
+                thread_root_event_id.as_deref() == message.thread_root_event_id.as_deref()
+            })
     });
     original_len.saturating_sub(messages.len())
 }
@@ -824,10 +958,10 @@ fn update_direct_stream_message_state(
     };
 
     messages[index].pending_action = Some(pending_action);
-    messages[index]
-        .send_handle
-        .clone()
-        .map_or(DirectStreamHandleState::Pending, DirectStreamHandleState::Ready)
+    messages[index].send_handle.clone().map_or(
+        DirectStreamHandleState::Pending,
+        DirectStreamHandleState::Ready,
+    )
 }
 
 fn resolve_direct_stream_pending_action(
@@ -869,8 +1003,7 @@ fn direct_stream_scope_matches(
     room_id: &str,
     thread_root_event_id: Option<&str>,
 ) -> bool {
-    message.room_id == room_id
-        && message.thread_root_event_id.as_deref() == thread_root_event_id
+    message.room_id == room_id && message.thread_root_event_id.as_deref() == thread_root_event_id
 }
 
 pub fn set_room_stream_preview_enabled(enabled: bool) -> Result<String, String> {
@@ -889,6 +1022,113 @@ pub fn set_room_stream_preview_enabled(enabled: bool) -> Result<String, String> 
         "Bot stream preview is disabled. Finished bot output will be sent back to Matrix automatically."
             .into()
     })
+}
+
+pub fn save_verified_sender_session(
+    sender_profile_id: &str,
+    homeserver_url: &str,
+    matrix_user_id: &str,
+    device_id: &str,
+    access_token: &str,
+    access_token_env: &str,
+) -> Result<String, String> {
+    ensure_loaded_for_current_user()?;
+    let blueprint = sender_profile_blueprint(sender_profile_id);
+    let verified_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis() as u64;
+
+    let message = with_context_mut(|ctx| {
+        let existing = ctx.state.sender_profiles.get(sender_profile_id).cloned();
+        let sender_profile = SenderProfile {
+            id: sender_profile_id.to_string(),
+            name: blueprint.name.to_string(),
+            enabled: true,
+            kind: SenderProfileKind::MatrixBot,
+            matrix_user_id: Some(matrix_user_id.trim().to_string()),
+            homeserver_url: Some(homeserver_url.trim().to_string()),
+            device_id: Some(device_id.trim().to_string()),
+            access_token_env: non_empty(access_token_env).or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|profile| profile.access_token_env.clone())
+            }),
+            access_token: Some(access_token.to_string()),
+            last_verified_at_millis: Some(verified_at),
+            last_verification_error: None,
+            security: blueprint.security,
+            description: Some(blueprint.description.to_string()),
+        };
+        ctx.state
+            .sender_profiles
+            .insert(sender_profile_id.to_string(), sender_profile);
+        ctx.store
+            .save(&ctx.state)
+            .map_err(|error| error.to_string())?;
+        Ok(format!(
+            "Verified sender \"{}\" as {}.",
+            blueprint.name, matrix_user_id
+        ))
+    })?;
+
+    Cx::post_action(BotfatherAction::StateChanged);
+    Ok(message)
+}
+
+pub fn record_sender_verification_failure(
+    sender_profile_id: &str,
+    homeserver_url: &str,
+    matrix_user_id: &str,
+    access_token_env: &str,
+    error: &str,
+) -> Result<(), String> {
+    ensure_loaded_for_current_user()?;
+    let blueprint = sender_profile_blueprint(sender_profile_id);
+    with_context_mut(|ctx| {
+        let existing = ctx.state.sender_profiles.get(sender_profile_id).cloned();
+        let sender_profile = SenderProfile {
+            id: sender_profile_id.to_string(),
+            name: blueprint.name.to_string(),
+            enabled: true,
+            kind: SenderProfileKind::MatrixBot,
+            matrix_user_id: non_empty(matrix_user_id).or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|profile| profile.matrix_user_id.clone())
+            }),
+            homeserver_url: non_empty(homeserver_url).or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|profile| profile.homeserver_url.clone())
+            }),
+            device_id: existing
+                .as_ref()
+                .and_then(|profile| profile.device_id.clone()),
+            access_token_env: non_empty(access_token_env).or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|profile| profile.access_token_env.clone())
+            }),
+            access_token: existing
+                .as_ref()
+                .and_then(|profile| profile.access_token.clone()),
+            last_verified_at_millis: existing
+                .as_ref()
+                .and_then(|profile| profile.last_verified_at_millis),
+            last_verification_error: Some(error.to_string()),
+            security: blueprint.security,
+            description: Some(blueprint.description.to_string()),
+        };
+        ctx.state
+            .sender_profiles
+            .insert(sender_profile_id.to_string(), sender_profile);
+        ctx.store
+            .save(&ctx.state)
+            .map_err(|error| error.to_string())
+    })?;
+    Cx::post_action(BotfatherAction::StateChanged);
+    Ok(())
 }
 
 pub fn room_stream_preview(
@@ -925,7 +1165,8 @@ pub fn take_room_stream_preview_text(
 ) -> Option<String> {
     let mut previews = STREAM_PREVIEWS.lock().unwrap();
     let preview = previews.iter_mut().find(|preview| {
-        preview.room_id == room_id && preview.thread_root_event_id.as_deref() == thread_root_event_id
+        preview.room_id == room_id
+            && preview.thread_root_event_id.as_deref() == thread_root_event_id
     })?;
     if !preview.can_post || preview.text.trim().is_empty() {
         return None;
@@ -939,6 +1180,14 @@ pub fn take_room_stream_preview_text(
 }
 
 pub fn bind_room_to_bot(room_id: &str, bot_selector: &str) -> Result<String, String> {
+    bind_room_to_bot_and_sender(room_id, bot_selector, None)
+}
+
+pub fn bind_room_to_bot_and_sender(
+    room_id: &str,
+    bot_selector: &str,
+    sender_selector: Option<&str>,
+) -> Result<String, String> {
     ensure_loaded_for_current_user()?;
     let room_id = room_id.trim();
     let selector = bot_selector.trim();
@@ -946,7 +1195,7 @@ pub fn bind_room_to_bot(room_id: &str, bot_selector: &str) -> Result<String, Str
         return Err("Usage: /bot bind <bot-id>".into());
     }
 
-    let bot_name = with_context_mut(|ctx| {
+    let (bot_name, sender_name) = with_context_mut(|ctx| {
         if !ctx.state.inventory.rooms.contains_key(room_id) {
             return Err(format!(
                 "Room {room_id} is not in the current inventory snapshot."
@@ -970,6 +1219,24 @@ pub fn bind_room_to_bot(room_id: &str, bot_selector: &str) -> Result<String, Str
                 runtime_kind_label(profile.kind()),
             ));
         }
+        let sender_profile_id = match sender_selector.and_then(non_empty) {
+            Some(selector) => Some(
+                resolve_sender_profile_id_selector(&ctx.state, &selector).ok_or_else(|| {
+                    if selector == DEFAULT_SHARED_BOT_SENDER_ID
+                        || selector == DEFAULT_SECURE_BOT_SENDER_ID
+                    {
+                        sender_profile_setup_guidance(&selector)
+                    } else {
+                        format!("Sender selector `{selector}` did not match any sender.")
+                    }
+                })?,
+            ),
+            None => None,
+        };
+        let sender_name = sender_profile_id
+            .as_ref()
+            .and_then(|sender_profile_id| ctx.state.sender_profiles.get(sender_profile_id))
+            .map(|profile| profile.name.clone());
 
         ctx.state.room_bindings.insert(
             room_id.to_string(),
@@ -980,16 +1247,22 @@ pub fn bind_room_to_bot(room_id: &str, bot_selector: &str) -> Result<String, Str
                 trigger: None,
                 delivery: None,
                 permissions: None,
+                sender_profile_id,
             }],
         );
         ctx.store
             .save(&ctx.state)
             .map_err(|error| error.to_string())?;
-        Ok(bot.name.clone())
+        Ok((bot.name.clone(), sender_name))
     })?;
 
     Cx::post_action(BotfatherAction::StateChanged);
-    Ok(format!("Bound this room to bot \"{bot_name}\"."))
+    Ok(match sender_name {
+        Some(sender_name) => {
+            format!("Bound this room to bot \"{bot_name}\" via sender \"{sender_name}\".")
+        }
+        None => format!("Bound this room to bot \"{bot_name}\"."),
+    })
 }
 
 pub fn create_bot(
@@ -1031,6 +1304,7 @@ pub fn create_bot(
                 id: bot_id.clone(),
                 name: bot_name.clone(),
                 runtime_profile_id: runtime_profile_id.clone(),
+                default_sender_profile_id: Some(DEFAULT_CURRENT_USER_SENDER_ID.to_string()),
                 priority: 0,
                 enabled: true,
                 trigger: TriggerPolicy {
@@ -1120,7 +1394,9 @@ pub fn set_bot_runtime_profile(
 pub fn set_bot_model(bot_selector: &str, model: &str) -> Result<String, String> {
     set_bot_override(bot_selector, "model", model, |bot, profile, value| {
         if profile.kind() != RuntimeKind::Crew {
-            return Err("`/bot set-model` is currently only available for Crew-backed bots.".into());
+            return Err(
+                "`/bot set-model` is currently only available for Crew-backed bots.".into(),
+            );
         }
         bot.runtime_override.model = value;
         Ok(format!(
@@ -1217,6 +1493,7 @@ pub fn bind_room_to_runtime(room_id: &str, runtime_kind: RuntimeKind) -> Result<
                 trigger: None,
                 delivery: None,
                 permissions: None,
+                sender_profile_id: None,
             }],
         );
         ctx.store
@@ -1255,6 +1532,13 @@ pub fn room_primary_bot_id(room_id: &str) -> Option<String> {
         .map(|resolved| resolved.bot.id)
 }
 
+pub fn room_primary_sender_profile_id(room_id: &str) -> Option<String> {
+    let state = snapshot()?;
+    resolve_room_bot(&state, room_id, None)
+        .ok()
+        .map(|resolved| resolved.sender_profile.id)
+}
+
 pub fn room_bot_options(_room_id: Option<&str>) -> Vec<RoomBotOption> {
     let Some(state) = snapshot() else {
         return Vec::new();
@@ -1290,6 +1574,212 @@ pub fn room_bot_options(_room_id: Option<&str>) -> Vec<RoomBotOption> {
     options
 }
 
+pub fn sender_profile_options() -> Vec<SenderOption> {
+    let Some(state) = snapshot() else {
+        return Vec::new();
+    };
+
+    let mut options = Vec::new();
+    for profile in state
+        .sender_profiles
+        .values()
+        .filter(|profile| profile.enabled)
+    {
+        options.push(SenderOption {
+            sender_profile_id: profile.id.clone(),
+            label: sender_option_label(profile),
+            kind: profile.kind,
+            security: profile.security,
+            ready: sender_profile_ready(profile),
+        });
+    }
+
+    if !options
+        .iter()
+        .any(|option| option.sender_profile_id == DEFAULT_SHARED_BOT_SENDER_ID)
+    {
+        options.push(SenderOption {
+            sender_profile_id: DEFAULT_SHARED_BOT_SENDER_ID.to_string(),
+            label: "Shared Bot Sender (matrix-bot, standard, setup required)".into(),
+            kind: SenderProfileKind::MatrixBot,
+            security: SenderSecurityLevel::Standard,
+            ready: false,
+        });
+    }
+
+    if !options
+        .iter()
+        .any(|option| option.sender_profile_id == DEFAULT_SECURE_BOT_SENDER_ID)
+    {
+        options.push(SenderOption {
+            sender_profile_id: DEFAULT_SECURE_BOT_SENDER_ID.to_string(),
+            label: "Secure Room Sender (matrix-bot, isolated, setup required)".into(),
+            kind: SenderProfileKind::MatrixBot,
+            security: SenderSecurityLevel::Isolated,
+            ready: false,
+        });
+    }
+
+    options.sort_by(|lhs, rhs| {
+        lhs.label
+            .cmp(&rhs.label)
+            .then_with(|| lhs.sender_profile_id.cmp(&rhs.sender_profile_id))
+    });
+    options
+}
+
+pub fn sender_profile_summary(sender_profile_id: &str) -> String {
+    let Some(state) = snapshot() else {
+        return "BotFather state is not loaded.".into();
+    };
+    let Some(profile) = state.sender_profiles.get(sender_profile_id) else {
+        return format!("Sender profile `{sender_profile_id}` is not configured yet.");
+    };
+    format!(
+        "sender: {}\nkind: {}\nsecurity: {}\ntarget: {}\nmode: {}\nverification: {}",
+        profile.name,
+        sender_kind_label(profile.kind),
+        sender_security_label(profile.security),
+        sender_profile_target_summary(profile),
+        sender_mode_label(profile),
+        sender_verification_summary(profile),
+    )
+}
+
+pub fn bindings_stats_summary() -> String {
+    let Some(state) = snapshot() else {
+        return "BotFather state is not loaded.".into();
+    };
+
+    let explicit_room_bindings = state.room_bindings.len();
+    let shared_room_bindings = state
+        .room_bindings
+        .keys()
+        .filter(|room_id| {
+            resolve_room_bot(&state, room_id, None)
+                .map(|resolved| !resolved.sender_profile.uses_current_user())
+                .unwrap_or(false)
+        })
+        .count();
+    let personal_room_bindings = explicit_room_bindings.saturating_sub(shared_room_bindings);
+
+    format!(
+        "Explicit room bindings: {}\nShared room mode: {}\nPersonal assist mode: {}\nOnly rooms that you explicitly bound from the room panel appear below.",
+        explicit_room_bindings, shared_room_bindings, personal_room_bindings
+    )
+}
+
+pub fn bindings_overview() -> String {
+    let Some(state) = snapshot() else {
+        return "BotFather state is not loaded.".into();
+    };
+
+    let mut lines = Vec::new();
+    let mut room_ids = state.room_bindings.keys().cloned().collect::<Vec<_>>();
+    room_ids.sort();
+    for room_id in room_ids {
+        let room = match state.inventory.rooms.get(&room_id) {
+            Some(room) => Some(room),
+            None => None,
+        };
+        let Ok(resolved) = resolve_room_bot(&state, &room_id, None) else {
+            continue;
+        };
+        let mode = if resolved.sender_profile.uses_current_user() {
+            "personal-assist"
+        } else {
+            "shared-bot"
+        };
+        let source = match &resolved.source {
+            BindingSource::Room { .. } => "room",
+            BindingSource::Space { .. } => "space",
+            BindingSource::Default => "default",
+        };
+        let room_name = room
+            .and_then(|room| {
+                room.display_name
+                    .clone()
+                    .or_else(|| room.canonical_alias.clone())
+            })
+            .unwrap_or_else(|| room_id.clone());
+        lines.push(format!(
+            "- {} | {} | bot: {} | sender: {} -> {} ({}) | runtime: {} | source: {}",
+            room_name,
+            mode,
+            resolved.bot.name,
+            resolved.sender_profile.name,
+            resolved
+                .sender_profile
+                .matrix_user_id
+                .as_deref()
+                .unwrap_or("(current-user)"),
+            sender_security_label(resolved.sender_profile.security),
+            runtime_kind_label(resolved.runtime_kind()),
+            source,
+        ));
+    }
+
+    if lines.is_empty() {
+        "No explicit room bindings yet. Open a room and click Bind Room to start managing it with BotFather.".into()
+    } else {
+        lines.join("\n")
+    }
+}
+
+pub fn explicit_room_binding_entries() -> Vec<ExplicitRoomBindingEntry> {
+    let Some(state) = snapshot() else {
+        return Vec::new();
+    };
+
+    let mut entries = Vec::new();
+    let mut room_ids = state.room_bindings.keys().cloned().collect::<Vec<_>>();
+    room_ids.sort();
+    for room_id in room_ids {
+        let Ok(resolved) = resolve_room_bot(&state, &room_id, None) else {
+            continue;
+        };
+        let room_name = state
+            .inventory
+            .rooms
+            .get(&room_id)
+            .and_then(|room| {
+                room.display_name
+                    .clone()
+                    .or_else(|| room.canonical_alias.clone())
+            })
+            .unwrap_or_else(|| room_id.clone());
+        let mode = sender_mode_label(&resolved.sender_profile).to_string();
+        let bot_name = resolved.bot.name.clone();
+        let sender_name = resolved.sender_profile.name.clone();
+        let sender_profile_id = resolved.sender_profile.id.clone();
+        let sender_security = sender_security_label(resolved.sender_profile.security).to_string();
+        let sender_ready = sender_profile_ready(&resolved.sender_profile);
+        let runtime = runtime_kind_label(resolved.runtime_kind()).to_string();
+        entries.push(ExplicitRoomBindingEntry {
+            room_id: room_id.clone(),
+            room_name,
+            mode,
+            source: match &resolved.source {
+                BindingSource::Room { .. } => "room".into(),
+                BindingSource::Space { .. } => "space".into(),
+                BindingSource::Default => "default".into(),
+            },
+            bot_name,
+            sender_name,
+            sender_profile_id,
+            sender_security,
+            sender_ready,
+            runtime,
+        });
+    }
+    entries.sort_by(|lhs, rhs| {
+        lhs.room_name
+            .cmp(&rhs.room_name)
+            .then_with(|| lhs.room_id.cmp(&rhs.room_id))
+    });
+    entries
+}
+
 pub fn describe_room_binding(room_id: &str) -> String {
     let Some(state) = snapshot() else {
         return "BotFather state is not loaded.".into();
@@ -1322,9 +1812,13 @@ pub fn describe_room_binding(room_id: &str) -> String {
                 .join(", ");
 
             format!(
-                "main bot: {} ({:?})\nsource: {source}\nruntime: {}\nworkspace: {}\noverride: {}\navailable: {}",
+                "main bot: {} ({:?})\nsource: {source}\nmode: {}\nsender: {} [{} / {}]\nruntime: {}\nworkspace: {}\noverride: {}\navailable: {}",
                 primary.bot.name,
                 primary.runtime_kind(),
+                sender_mode_label(&primary.sender_profile),
+                primary.sender_profile.name,
+                sender_kind_label(primary.sender_profile.kind),
+                sender_security_label(primary.sender_profile.security),
                 runtime_endpoint,
                 workspace,
                 bot_override_summary(&primary.runtime_override),
@@ -1456,7 +1950,8 @@ fn format_runtime_error_message(error: &str) -> String {
         return "503 Service Unavailable. Check whether the runtime service is running and the configured endpoint is reachable.".into();
     }
     if trimmed.contains("401 Unauthorized") {
-        return "401 Unauthorized. Check the configured auth token or token environment variable.".into();
+        return "401 Unauthorized. Check the configured auth token or token environment variable."
+            .into();
     }
     if trimmed.contains("404 Not Found") {
         return "404 Not Found. Check whether the runtime endpoint path is correct.".into();
@@ -1520,7 +2015,11 @@ pub fn stream_room_prompt_for_local_echo(
         false,
     );
 
-    if can_start_stream(&prepared.room_id, &prepared.runtime_profile_id, &prepared.dispatch_policy) {
+    if can_start_stream(
+        &prepared.room_id,
+        &prepared.runtime_profile_id,
+        &prepared.dispatch_policy,
+    ) {
         start_prepared_stream(prepared, local_created_at);
         return Ok(());
     }
@@ -1658,7 +2157,11 @@ fn start_prepared_stream(prepared: PreparedBotStream, local_created_at: u64) {
                 }
                 Ok(BotEvent::Error { message }) => {
                     release_stream_slot(&task_room_id, local_created_at);
-                    mark_stream_failed(&task_room_id, task_thread_root_event_id.as_deref(), &message);
+                    mark_stream_failed(
+                        &task_room_id,
+                        task_thread_root_event_id.as_deref(),
+                        &message,
+                    );
                     Cx::post_action(BotfatherAction::StreamFailed {
                         room_id: task_room_id.clone(),
                         thread_root_event_id: task_thread_root_event_id.clone(),
@@ -1773,6 +2276,347 @@ fn current_user_snapshot(user_id: &matrix_sdk::ruma::OwnedUserId) -> UserSnapsho
     }
 }
 
+fn sync_builtin_sender_profiles(state: &mut BotfatherState) {
+    let current_user_id = state.user.matrix_user_id.clone();
+    let homeserver_url = state.user.homeserver_url.clone();
+    state.sender_profiles.insert(
+        DEFAULT_CURRENT_USER_SENDER_ID.to_string(),
+        SenderProfile {
+            id: DEFAULT_CURRENT_USER_SENDER_ID.to_string(),
+            name: "Current User".into(),
+            enabled: true,
+            kind: SenderProfileKind::CurrentUser,
+            matrix_user_id: current_user_id,
+            homeserver_url,
+            device_id: None,
+            access_token_env: None,
+            access_token: None,
+            last_verified_at_millis: None,
+            last_verification_error: None,
+            security: SenderSecurityLevel::Standard,
+            description: Some("Uses the logged-in Robrix Matrix account.".into()),
+        },
+    );
+
+    if state.defaults.default_sender_profile_id.is_none() {
+        state.defaults.default_sender_profile_id = Some(DEFAULT_CURRENT_USER_SENDER_ID.to_string());
+    }
+    for bot in state.bots.values_mut() {
+        if bot.default_sender_profile_id.is_none() {
+            bot.default_sender_profile_id = Some(DEFAULT_CURRENT_USER_SENDER_ID.to_string());
+        }
+    }
+}
+
+fn upsert_optional_sender_profile(
+    state: &mut BotfatherState,
+    sender_profile_id: &str,
+    name: &str,
+    security: SenderSecurityLevel,
+    homeserver_url: &str,
+    matrix_user_id: &str,
+    device_id: &str,
+    access_token_env: &str,
+    description: &str,
+) {
+    let existing_profile = state.sender_profiles.get(sender_profile_id).cloned();
+    let sender_profile = non_empty(homeserver_url)
+        .zip(non_empty(matrix_user_id))
+        .map(|(homeserver_url, matrix_user_id)| SenderProfile {
+            id: sender_profile_id.to_string(),
+            name: name.to_string(),
+            enabled: true,
+            kind: SenderProfileKind::MatrixBot,
+            matrix_user_id: Some(matrix_user_id),
+            homeserver_url: Some(homeserver_url),
+            device_id: non_empty(device_id).or_else(|| {
+                existing_profile
+                    .as_ref()
+                    .and_then(|profile| profile.device_id.clone())
+            }),
+            access_token_env: non_empty(access_token_env).or_else(|| {
+                existing_profile
+                    .as_ref()
+                    .and_then(|profile| profile.access_token_env.clone())
+            }),
+            access_token: existing_profile
+                .as_ref()
+                .and_then(|profile| profile.access_token.clone()),
+            last_verified_at_millis: existing_profile
+                .as_ref()
+                .and_then(|profile| profile.last_verified_at_millis),
+            last_verification_error: existing_profile
+                .as_ref()
+                .and_then(|profile| profile.last_verification_error.clone()),
+            security,
+            description: Some(description.into()),
+        });
+
+    match sender_profile {
+        Some(sender_profile) => {
+            state
+                .sender_profiles
+                .insert(sender_profile_id.to_string(), sender_profile);
+        }
+        None => {
+            state.sender_profiles.remove(sender_profile_id);
+        }
+    }
+}
+
+fn sender_homeserver(profile: Option<&SenderProfile>) -> String {
+    profile
+        .and_then(|profile| profile.homeserver_url.clone())
+        .unwrap_or_default()
+}
+
+fn sender_user_id(profile: Option<&SenderProfile>) -> String {
+    profile
+        .and_then(|profile| profile.matrix_user_id.clone())
+        .unwrap_or_default()
+}
+
+fn sender_device_id(profile: Option<&SenderProfile>) -> String {
+    profile
+        .and_then(|profile| profile.device_id.clone())
+        .unwrap_or_default()
+}
+
+fn sender_access_token_env(profile: Option<&SenderProfile>) -> String {
+    profile
+        .and_then(|profile| profile.access_token_env.clone())
+        .unwrap_or_default()
+}
+
+struct SenderProfileBlueprint {
+    name: &'static str,
+    security: SenderSecurityLevel,
+    description: &'static str,
+}
+
+fn sender_profile_blueprint(sender_profile_id: &str) -> SenderProfileBlueprint {
+    match sender_profile_id {
+        DEFAULT_SHARED_BOT_SENDER_ID => SenderProfileBlueprint {
+            name: "Shared Bot Sender",
+            security: SenderSecurityLevel::Standard,
+            description: "Shared Matrix bot sender used across standard rooms.",
+        },
+        DEFAULT_SECURE_BOT_SENDER_ID => SenderProfileBlueprint {
+            name: "Secure Room Sender",
+            security: SenderSecurityLevel::Isolated,
+            description: "Isolated Matrix bot sender intended for higher-security rooms.",
+        },
+        _ => SenderProfileBlueprint {
+            name: "Matrix Bot Sender",
+            security: SenderSecurityLevel::Elevated,
+            description: "Matrix bot sender configured from Robrix.",
+        },
+    }
+}
+
+fn sender_kind_label(kind: SenderProfileKind) -> &'static str {
+    match kind {
+        SenderProfileKind::CurrentUser => "current-user",
+        SenderProfileKind::MatrixBot => "matrix-bot",
+    }
+}
+
+fn sender_security_label(security: SenderSecurityLevel) -> &'static str {
+    match security {
+        SenderSecurityLevel::Standard => "standard",
+        SenderSecurityLevel::Elevated => "elevated",
+        SenderSecurityLevel::Isolated => "isolated",
+    }
+}
+
+fn sender_profile_target_summary(profile: &SenderProfile) -> String {
+    match profile.kind {
+        SenderProfileKind::CurrentUser => profile
+            .matrix_user_id
+            .clone()
+            .unwrap_or_else(|| "(logged-out)".into()),
+        SenderProfileKind::MatrixBot => {
+            let auth_source = if let Some(token_env) = profile
+                .access_token_env
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                format!("env: {token_env}")
+            } else if profile
+                .access_token
+                .as_deref()
+                .is_some_and(|token| !token.trim().is_empty())
+            {
+                "stored-token".into()
+            } else {
+                "missing-auth".into()
+            };
+            format!(
+                "{} @ {} | {} | device: {}",
+                profile
+                    .matrix_user_id
+                    .as_deref()
+                    .unwrap_or("(missing-user)"),
+                profile
+                    .homeserver_url
+                    .as_deref()
+                    .unwrap_or("(missing-homeserver)"),
+                auth_source,
+                profile.device_id.as_deref().unwrap_or("(missing-device)"),
+            )
+        }
+    }
+}
+
+fn sender_profile_ready(profile: &SenderProfile) -> bool {
+    match profile.kind {
+        SenderProfileKind::CurrentUser => true,
+        SenderProfileKind::MatrixBot => {
+            profile
+                .matrix_user_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+                && profile
+                    .homeserver_url
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                && profile
+                    .device_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                && (profile
+                    .access_token_env
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    || profile
+                        .access_token
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty()))
+        }
+    }
+}
+
+fn sender_verification_summary(profile: &SenderProfile) -> String {
+    match profile.kind {
+        SenderProfileKind::CurrentUser => "Uses the logged-in Robrix account.".into(),
+        SenderProfileKind::MatrixBot => {
+            if let Some(error) = profile
+                .last_verification_error
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                return format!("verification failed: {error}");
+            }
+            if let Some(last_verified_at_millis) = profile.last_verified_at_millis {
+                return format!("verified session stored (timestamp: {last_verified_at_millis})");
+            }
+            if sender_profile_ready(profile) {
+                return "ready to send using configured credentials.".into();
+            }
+            "setup required. Add credentials and verify this sender.".into()
+        }
+    }
+}
+
+fn sender_mode_label(profile: &SenderProfile) -> &'static str {
+    if profile.uses_current_user() {
+        "personal-assist"
+    } else {
+        "shared-room-bot"
+    }
+}
+
+fn sender_option_label(profile: &SenderProfile) -> String {
+    format!(
+        "{} ({}, {}, {})",
+        profile.name,
+        sender_kind_label(profile.kind),
+        sender_security_label(profile.security),
+        if sender_profile_ready(profile) {
+            "ready"
+        } else {
+            "setup required"
+        },
+    )
+}
+
+pub fn sender_profile_option(sender_profile_id: &str) -> Option<SenderOption> {
+    sender_profile_options()
+        .into_iter()
+        .find(|option| option.sender_profile_id == sender_profile_id)
+}
+
+pub fn sender_profile_is_ready(sender_profile_id: &str) -> bool {
+    sender_profile_option(sender_profile_id)
+        .map(|option| option.ready)
+        .unwrap_or(false)
+}
+
+pub fn sender_profile_setup_guidance(sender_profile_id: &str) -> String {
+    let blueprint = sender_profile_blueprint(sender_profile_id);
+    format!(
+        "This room is still in personal-assist mode. To switch it to shared room mode, configure and verify an independent Matrix bot account for \"{}\" in BotFather Settings -> Senders. This keeps bot output separate from your own account, makes shared-room attribution clear, and gives higher-security rooms an isolated sender boundary.",
+        blueprint.name
+    )
+}
+
+fn resolve_sender_profile_id_selector(state: &BotfatherState, selector: &str) -> Option<String> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return None;
+    }
+    state
+        .sender_profiles
+        .values()
+        .find(|profile| {
+            profile.id.eq_ignore_ascii_case(selector) || profile.name.eq_ignore_ascii_case(selector)
+        })
+        .map(|profile| profile.id.clone())
+}
+
+pub fn resolved_sender_profile(room_id: &str) -> Option<SenderProfile> {
+    let state = snapshot()?;
+    resolve_room_bot(&state, room_id, None)
+        .ok()
+        .map(|resolved| resolved.sender_profile)
+}
+
+pub fn room_is_personal_assist(room_id: &str) -> bool {
+    resolved_sender_profile(room_id)
+        .map(|profile| profile.uses_current_user())
+        .unwrap_or(true)
+}
+
+pub fn room_uses_current_user_sender(room_id: &str) -> bool {
+    room_is_personal_assist(room_id)
+}
+
+pub async fn post_markdown_via_resolved_sender(
+    room_id: &str,
+    thread_root_event_id: Option<&str>,
+    markdown: String,
+) -> Result<String, String> {
+    let resolved = snapshot()
+        .ok_or_else(|| "BotFather state is not loaded.".to_string())
+        .and_then(|state| {
+            resolve_room_bot(&state, room_id, None).map_err(describe_resolve_error)
+        })?;
+    if resolved.sender_profile.uses_current_user() {
+        return Err("The resolved sender is the current Matrix user.".into());
+    }
+    sender::send_markdown_via_sender(
+        &resolved.sender_profile,
+        room_id,
+        thread_root_event_id,
+        markdown,
+    )
+    .await?;
+    Ok(format!(
+        "Posted bot response via sender \"{}\".",
+        resolved.sender_profile.name
+    ))
+}
+
 fn register_active_stream(
     room_id: String,
     thread_root_event_id: Option<String>,
@@ -1832,7 +2676,11 @@ fn abort_all_active_streams() {
     }
 }
 
-fn can_start_stream(room_id: &str, runtime_profile_id: &str, dispatch_policy: &DispatchPolicy) -> bool {
+fn can_start_stream(
+    room_id: &str,
+    runtime_profile_id: &str,
+    dispatch_policy: &DispatchPolicy,
+) -> bool {
     let active_streams = ACTIVE_STREAMS.lock().unwrap();
     let room_count = active_streams
         .iter()
@@ -1902,8 +2750,7 @@ fn take_queued_stream(room_id: &str, local_created_at: u64) -> Option<QueuedBotS
 
 fn has_queued_stream_for_scope(room_id: &str, thread_root_event_id: Option<&str>) -> bool {
     QUEUED_STREAMS.lock().unwrap().iter().any(|stream| {
-        stream.room_id == room_id
-            && stream.thread_root_event_id.as_deref() == thread_root_event_id
+        stream.room_id == room_id && stream.thread_root_event_id.as_deref() == thread_root_event_id
     })
 }
 
@@ -1931,7 +2778,8 @@ fn update_stream_preview(
 ) {
     let mut previews = STREAM_PREVIEWS.lock().unwrap();
     if let Some(preview) = previews.iter_mut().find(|preview| {
-        preview.room_id == room_id && preview.thread_root_event_id.as_deref() == thread_root_event_id
+        preview.room_id == room_id
+            && preview.thread_root_event_id.as_deref() == thread_root_event_id
     }) {
         preview.runtime_kind = runtime_kind;
         preview.bot_name = bot_name.to_string();
@@ -1957,7 +2805,8 @@ fn update_stream_preview(
 fn append_stream_preview(room_id: &str, thread_root_event_id: Option<&str>, delta: &str) {
     let mut previews = STREAM_PREVIEWS.lock().unwrap();
     let Some(preview) = previews.iter_mut().find(|preview| {
-        preview.room_id == room_id && preview.thread_root_event_id.as_deref() == thread_root_event_id
+        preview.room_id == room_id
+            && preview.thread_root_event_id.as_deref() == thread_root_event_id
     }) else {
         return;
     };
@@ -1969,7 +2818,8 @@ fn append_stream_preview(room_id: &str, thread_root_event_id: Option<&str>, delt
 fn mark_stream_finished(room_id: &str, thread_root_event_id: Option<&str>, text: &str) {
     let mut previews = STREAM_PREVIEWS.lock().unwrap();
     let Some(preview) = previews.iter_mut().find(|preview| {
-        preview.room_id == room_id && preview.thread_root_event_id.as_deref() == thread_root_event_id
+        preview.room_id == room_id
+            && preview.thread_root_event_id.as_deref() == thread_root_event_id
     }) else {
         return;
     };
@@ -1982,7 +2832,8 @@ fn mark_stream_finished(room_id: &str, thread_root_event_id: Option<&str>, text:
 fn mark_stream_failed(room_id: &str, thread_root_event_id: Option<&str>, error: &str) {
     let mut previews = STREAM_PREVIEWS.lock().unwrap();
     let Some(preview) = previews.iter_mut().find(|preview| {
-        preview.room_id == room_id && preview.thread_root_event_id.as_deref() == thread_root_event_id
+        preview.room_id == room_id
+            && preview.thread_root_event_id.as_deref() == thread_root_event_id
     }) else {
         return;
     };
@@ -1994,7 +2845,8 @@ fn mark_stream_failed(room_id: &str, thread_root_event_id: Option<&str>, error: 
 fn mark_stream_cancelled(room_id: &str, thread_root_event_id: Option<&str>) {
     let mut previews = STREAM_PREVIEWS.lock().unwrap();
     let Some(preview) = previews.iter_mut().find(|preview| {
-        preview.room_id == room_id && preview.thread_root_event_id.as_deref() == thread_root_event_id
+        preview.room_id == room_id
+            && preview.thread_root_event_id.as_deref() == thread_root_event_id
     }) else {
         return;
     };
@@ -2009,7 +2861,8 @@ fn remove_stream_preview(
 ) -> Option<BotStreamPreviewSnapshot> {
     let mut previews = STREAM_PREVIEWS.lock().unwrap();
     let index = previews.iter().position(|preview| {
-        preview.room_id == room_id && preview.thread_root_event_id.as_deref() == thread_root_event_id
+        preview.room_id == room_id
+            && preview.thread_root_event_id.as_deref() == thread_root_event_id
     })?;
     let preview = previews.swap_remove(index);
     Some(BotStreamPreviewSnapshot {
@@ -2312,6 +3165,9 @@ fn describe_resolve_error(error: ResolveError) -> String {
         ResolveError::UnknownBot(bot_id) => format!("Bot {bot_id} is missing from the state file."),
         ResolveError::UnknownRuntimeProfile(profile_id) => {
             format!("Runtime profile {profile_id} is missing from the state file.")
+        }
+        ResolveError::UnknownSenderProfile(sender_profile_id) => {
+            format!("Sender profile {sender_profile_id} is missing from the state file.")
         }
         ResolveError::UnknownWorkspace(workspace_id) => {
             format!("Workspace {workspace_id} is missing from the state file.")
