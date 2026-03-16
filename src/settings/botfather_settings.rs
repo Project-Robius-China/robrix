@@ -1,6 +1,6 @@
 use makepad_widgets::*;
 use matrix_sdk::ruma::OwnedRoomId;
-use robrix_botfather::RuntimeKind;
+use robrix_botfather::{RuntimeKind, SenderSecurityLevel};
 
 use crate::{
     app::AppStateAction,
@@ -218,6 +218,126 @@ live_design! {
         }
     }
 
+    SenderDirectoryEntry = {{SenderDirectoryListEntry}} {
+        width: Fill, height: Fit
+        flow: Down
+        spacing: 8
+        padding: 12
+        margin: {bottom: 8}
+        show_bg: true
+        draw_bg: {
+            color: (COLOR_BG_PREVIEW)
+            border_radius: 6.0
+            border_size: 1.0
+            border_color: (COLOR_SECONDARY)
+        }
+
+        sender_title = <View> {
+            width: Fill, height: Fit
+            flow: RightWrap
+            spacing: 8
+
+            sender_name = <Label> {
+                width: Fit, height: Fit
+                draw_text: {
+                    text_style: <THEME_FONT_BOLD>{font_size: 11.0}
+                    color: (COLOR_TEXT)
+                }
+                text: "[Sender Name]"
+            }
+
+            sender_id = <Label> {
+                width: Fill, height: Fit
+                draw_text: {
+                    text_style: <REGULAR_TEXT>{font_size: 9.5}
+                    color: (COLOR_TEXT)
+                }
+                text: "[sender-id]"
+            }
+        }
+
+        sender_chips = <View> {
+            width: Fill, height: Fit
+            flow: RightWrap
+            spacing: 8
+
+            kind_chip = <BindingChip> { chip_label = { text: "matrix-bot" } }
+            security_chip = <BindingChip> { chip_label = { text: "standard" } }
+            status_chip = <BindingChip> { chip_label = { text: "ready" } }
+            default_chip = <BindingChip> { chip_label = { text: "default room sender" } }
+        }
+
+        sender_target = <Label> {
+            width: Fill, height: Fit
+            flow: RightWrap
+            draw_text: {
+                wrap: Word
+                text_style: <REGULAR_TEXT>{font_size: 10.0}
+                color: (COLOR_TEXT)
+            }
+            text: ""
+        }
+
+        sender_verification = <Label> {
+            width: Fill, height: Fit
+            flow: RightWrap
+            draw_text: {
+                wrap: Word
+                text_style: <REGULAR_TEXT>{font_size: 10.0}
+                color: (COLOR_TEXT)
+            }
+            text: ""
+        }
+
+        sender_room_access = <Label> {
+            width: Fill, height: Fit
+            flow: RightWrap
+            draw_text: {
+                wrap: Word
+                text_style: <REGULAR_TEXT>{font_size: 10.0}
+                color: (COLOR_TEXT)
+            }
+            text: ""
+        }
+
+        sender_actions = <View> {
+            width: Fill, height: Fit
+            flow: RightWrap
+            spacing: 10
+
+            sender_manage_button = <RobrixIconButton> {
+                width: Fit
+                padding: 10
+                draw_bg: {
+                    color: (COLOR_ACTIVE_PRIMARY)
+                }
+                draw_icon: {
+                    svg_file: (ICON_LINK)
+                    color: (COLOR_PRIMARY)
+                }
+                draw_text: {
+                    color: (COLOR_PRIMARY)
+                }
+                icon_walk: { width: 14, height: 14 }
+                text: "Manage"
+            }
+
+            sender_default_button = <RobrixIconButton> {
+                width: Fit
+                padding: 10
+                draw_bg: {
+                    color: (COLOR_SECONDARY)
+                }
+                draw_icon: {
+                    svg_file: (ICON_CHECKMARK)
+                    color: (COLOR_TEXT)
+                }
+                icon_walk: { width: 14, height: 14 }
+                text: "Use As Default"
+            }
+        }
+    }
+
     SectionButton = <RobrixIconButton> {
         width: Fit
         padding: 11
@@ -264,6 +384,31 @@ live_design! {
         width: Fill, height: Fit
         flow: Down
         spacing: 8
+    }
+
+    SenderManagerDropDown = <DropDown> {
+        width: Fill
+        height: Fit
+        popup_menu_position: BelowInput
+        labels: ["Create New Sender"]
+        draw_bg: {
+            border_radius: 6.0
+            color: (COLOR_PRIMARY)
+            color_hover: (COLOR_BG_PREVIEW)
+            color_focus: (COLOR_BG_PREVIEW)
+            color_down: (COLOR_BG_PREVIEW)
+            border_color: (COLOR_SECONDARY)
+            border_color_hover: (COLOR_SECONDARY)
+            border_color_focus: (COLOR_ACTIVE_PRIMARY)
+            border_color_down: (COLOR_ACTIVE_PRIMARY)
+            border_color_2: (COLOR_SECONDARY)
+            border_color_2_hover: (COLOR_SECONDARY)
+            border_color_2_focus: (COLOR_ACTIVE_PRIMARY)
+            border_color_2_down: (COLOR_ACTIVE_PRIMARY)
+        }
+        draw_text: {
+            color: (COLOR_TEXT)
+        }
     }
 
     pub BotfatherSettings = {{BotfatherSettings}} {
@@ -471,12 +616,42 @@ live_design! {
             flow: Down
             spacing: 12
 
-            current_sender_card = <SettingsCard> {
+            sender_directory_card = <SettingsCard> {
                 <SubsectionLabel> {
-                    text: "Current User Sender"
+                    text: "Configured Senders"
                 }
 
-                current_sender_summary_label = <SummaryLabel> {}
+                <SummaryLabel> {
+                    text: "Configured Matrix bot senders appear here as cards. Current user delivery stays available in per-room binding, but it is no longer shown as a separate sender card."
+                }
+
+                sender_directory_list_shell = <RoundedView> {
+                    width: Fill, height: Fit
+                    padding: 10
+                    show_bg: true
+                    draw_bg: {
+                        color: (COLOR_PRIMARY)
+                        border_radius: 6.0
+                        border_size: 1.0
+                        border_color: (COLOR_SECONDARY)
+                    }
+
+                    sender_directory_list = <FlatList> {
+                        width: Fill
+                        height: 280
+                        spacing: 0
+                        flow: Down
+                        grab_key_focus: true
+                        drag_scrolling: true
+                        scroll_bars: { show_scroll_x: false, show_scroll_y: true }
+
+                        sender_entry = <SenderDirectoryEntry> {}
+                    }
+
+                    sender_directory_empty_label = <SummaryLabel> {
+                        text: "No Matrix bot senders are configured yet."
+                    }
+                }
             }
 
             shared_sender_card = <SettingsCard> {
@@ -619,6 +794,175 @@ live_design! {
                             icon_walk: { width: 14, height: 14 }
                             text: "Verify Login"
                         }
+                    }
+                }
+            }
+
+            custom_sender_card = <SettingsCard> {
+                <SubsectionLabel> {
+                    text: "Custom Sender Manager"
+                }
+
+                selected_custom_sender_summary_label = <SummaryLabel> {
+                    text: "Create a new sender profile or select an existing one."
+                }
+
+                <PrefixedInputRow> {
+                    <PrefixLabel> { text: "Sender" }
+                    custom_sender_selector_dropdown = <SenderManagerDropDown> {}
+                }
+
+                <PrefixedInputRow> {
+                    <PrefixLabel> { text: "Profile ID" }
+                    custom_sender_profile_id_input = <SimpleTextInput> {
+                        width: Fill, height: Fit
+                        empty_text: "qa-shared-bot"
+                    }
+                }
+
+                <PrefixedInputRow> {
+                    <PrefixLabel> { text: "Display Name" }
+                    custom_sender_name_input = <SimpleTextInput> {
+                        width: Fill, height: Fit
+                        empty_text: "QA Shared Bot"
+                    }
+                }
+
+                <PrefixedInputRow> {
+                    <PrefixLabel> { text: "Security" }
+                    custom_sender_security_dropdown = <SenderManagerDropDown> {
+                        labels: ["Standard", "Elevated", "Isolated"]
+                    }
+                }
+
+                <PrefixedInputRow> {
+                    <PrefixLabel> { text: "Homeserver" }
+                    custom_sender_homeserver_input = <SimpleTextInput> {
+                        width: Fill, height: Fit
+                        empty_text: "https://matrix.example.org"
+                    }
+                }
+
+                <PrefixedInputRow> {
+                    <PrefixLabel> { text: "Matrix ID" }
+                    custom_sender_user_id_input = <SimpleTextInput> {
+                        width: Fill, height: Fit
+                        empty_text: "@qa-bot:example.org"
+                    }
+                }
+
+                <PrefixedInputRow> {
+                    <PrefixLabel> { text: "Device ID" }
+                    custom_sender_device_id_input = <SimpleTextInput> {
+                        width: Fill, height: Fit
+                        empty_text: "QABOT01"
+                    }
+                }
+
+                <PrefixedInputRow> {
+                    <PrefixLabel> { text: "Token Env" }
+                    custom_sender_access_token_env_input = <SimpleTextInput> {
+                        width: Fill, height: Fit
+                        empty_text: "QA_BOT_MATRIX_ACCESS_TOKEN"
+                    }
+                }
+
+                <PrefixedInputRow> {
+                    <PrefixLabel> { text: "Password" }
+                    custom_sender_password_input = <SimpleTextInput> {
+                        width: Fill, height: Fit
+                        empty_text: "Matrix account password (used only for verification)"
+                        is_password: true
+                    }
+                }
+
+                <SummaryLabel> {
+                    text: "Independent Matrix senders do not auto-join rooms. Invite the bot account first, or manually join it in public rooms before using it as a room sender."
+                }
+
+                <View> {
+                    width: Fill, height: Fit
+                    flow: RightWrap
+                    spacing: 10
+
+                    new_custom_sender_button = <RobrixIconButton> {
+                        width: Fit
+                        padding: 12
+                        draw_bg: {
+                            color: (COLOR_SECONDARY)
+                        }
+                        draw_icon: {
+                            svg_file: (ICON_INFO)
+                            color: (COLOR_TEXT)
+                        }
+                        icon_walk: { width: 14, height: 14 }
+                        text: "New Sender"
+                    }
+
+                    save_custom_sender_button = <RobrixIconButton> {
+                        width: Fit
+                        padding: 12
+                        draw_bg: {
+                            color: (COLOR_ACTIVE_PRIMARY)
+                        }
+                        draw_icon: {
+                            svg_file: (ICON_CHECKMARK)
+                            color: (COLOR_PRIMARY)
+                        }
+                        draw_text: {
+                            color: (COLOR_PRIMARY)
+                        }
+                        icon_walk: { width: 14, height: 14 }
+                        text: "Save Sender"
+                    }
+
+                    verify_custom_sender_button = <RobrixIconButton> {
+                        width: Fit
+                        padding: 12
+                        draw_bg: {
+                            color: (COLOR_ACTIVE_PRIMARY)
+                        }
+                        draw_icon: {
+                            svg_file: (ICON_CHECKMARK)
+                            color: (COLOR_PRIMARY)
+                        }
+                        draw_text: {
+                            color: (COLOR_PRIMARY)
+                        }
+                        icon_walk: { width: 14, height: 14 }
+                        text: "Verify Login"
+                    }
+
+                    set_default_custom_sender_button = <RobrixIconButton> {
+                        width: Fit
+                        padding: 12
+                        draw_bg: {
+                            color: (COLOR_SECONDARY)
+                        }
+                        draw_icon: {
+                            svg_file: (ICON_LINK)
+                            color: (COLOR_TEXT)
+                        }
+                        icon_walk: { width: 14, height: 14 }
+                        text: "Use As Default"
+                    }
+
+                    delete_custom_sender_button = <RobrixIconButton> {
+                        width: Fit
+                        padding: 12
+                        draw_bg: {
+                            color: (COLOR_BG_DANGER_RED)
+                            border_color: (COLOR_FG_DANGER_RED)
+                        }
+                        draw_icon: {
+                            svg_file: (ICON_CLOSE)
+                            color: (COLOR_FG_DANGER_RED)
+                        }
+                        draw_text: {
+                            color: (COLOR_FG_DANGER_RED)
+                        }
+                        icon_walk: { width: 14, height: 14 }
+                        text: "Delete Sender"
                     }
                 }
             }
@@ -796,6 +1140,13 @@ enum BindingEntryAction {
     None,
 }
 
+#[derive(Clone, Debug, DefaultNone)]
+enum SenderEntryAction {
+    Manage(String),
+    MakeDefault(String),
+    None,
+}
+
 #[derive(Live, LiveHook, Widget)]
 pub struct BindingListEntry {
     #[deref]
@@ -884,6 +1235,91 @@ impl Widget for BindingListEntry {
 }
 
 #[derive(Live, LiveHook, Widget)]
+pub struct SenderDirectoryListEntry {
+    #[deref]
+    view: View,
+    #[rust]
+    entry: Option<botfather::SenderDirectoryEntry>,
+}
+
+impl Widget for SenderDirectoryListEntry {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+
+        let Some(entry) = self.entry.as_ref() else {
+            return;
+        };
+        if let Event::Actions(actions) = event {
+            if self.view.button(ids!(sender_manage_button)).clicked(actions) {
+                cx.widget_action(
+                    self.widget_uid(),
+                    &scope.path,
+                    SenderEntryAction::Manage(entry.sender_profile_id.clone()),
+                );
+            }
+            if self
+                .view
+                .button(ids!(sender_default_button))
+                .clicked(actions)
+            {
+                cx.widget_action(
+                    self.widget_uid(),
+                    &scope.path,
+                    SenderEntryAction::MakeDefault(entry.sender_profile_id.clone()),
+                );
+            }
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let Some(entry) = scope.props.get::<botfather::SenderDirectoryEntry>() else {
+            self.entry = None;
+            return DrawStep::done();
+        };
+        if self.entry.as_ref().is_none_or(|existing| existing != entry) {
+            self.entry = Some(entry.clone());
+        }
+
+        self.view
+            .label(ids!(sender_name))
+            .set_text(cx, &entry.name);
+        self.view
+            .label(ids!(sender_id))
+            .set_text(cx, &entry.sender_profile_id);
+        self.view
+            .label(ids!(kind_chip.chip_label))
+            .set_text(cx, &entry.kind);
+        self.view
+            .label(ids!(security_chip.chip_label))
+            .set_text(cx, &entry.security);
+        self.view.label(ids!(status_chip.chip_label)).set_text(
+            cx,
+            if entry.ready {
+                "ready"
+            } else {
+                "needs setup"
+            },
+        );
+        self.view
+            .view(ids!(default_chip))
+            .set_visible(cx, entry.is_default);
+        self.view
+            .label(ids!(sender_target))
+            .set_text(cx, &format!("target: {}", entry.target));
+        self.view
+            .label(ids!(sender_verification))
+            .set_text(cx, &format!("verification: {}", entry.verification));
+        self.view
+            .label(ids!(sender_room_access))
+            .set_text(cx, &format!("room access: {}", entry.room_access));
+        self.view
+            .button(ids!(sender_default_button))
+            .set_visible(cx, entry.can_set_default && !entry.is_default);
+        self.view.draw_walk(cx, scope, walk)
+    }
+}
+
+#[derive(Live, LiveHook, Widget)]
 pub struct BotfatherSettings {
     #[deref]
     view: View,
@@ -897,6 +1333,14 @@ pub struct BotfatherSettings {
     shared_sender_expanded: bool,
     #[rust]
     secure_sender_expanded: bool,
+    #[rust]
+    custom_sender_choice_ids: Vec<String>,
+    #[rust]
+    selected_custom_sender_profile_id: Option<String>,
+    #[rust]
+    selected_custom_sender_security: SenderSecurityLevel,
+    #[rust]
+    sender_directory_entries: Vec<botfather::SenderDirectoryEntry>,
     #[rust]
     bindings_filter: BindingsFilter,
     #[rust]
@@ -932,6 +1376,14 @@ impl Widget for BotfatherSettings {
             let secure_sender_toggle = self.view.button(ids!(secure_sender_toggle));
             let shared_sender_verify_button = self.view.button(ids!(shared_sender_verify_button));
             let secure_sender_verify_button = self.view.button(ids!(secure_sender_verify_button));
+            let new_custom_sender_button = self.view.button(ids!(new_custom_sender_button));
+            let save_custom_sender_button = self.view.button(ids!(save_custom_sender_button));
+            let verify_custom_sender_button =
+                self.view.button(ids!(verify_custom_sender_button));
+            let set_default_custom_sender_button =
+                self.view.button(ids!(set_default_custom_sender_button));
+            let delete_custom_sender_button =
+                self.view.button(ids!(delete_custom_sender_button));
             let crew_runtime_healthcheck_button =
                 self.view.button(ids!(crew_runtime_healthcheck_button));
             let openclaw_runtime_healthcheck_button =
@@ -964,6 +1416,25 @@ impl Widget for BotfatherSettings {
                 .text_input(ids!(secure_sender_access_token_env_input));
             let secure_sender_password_input =
                 self.view.text_input(ids!(secure_sender_password_input));
+            let custom_sender_selector_dropdown =
+                self.view.drop_down(ids!(custom_sender_selector_dropdown));
+            let custom_sender_security_dropdown =
+                self.view.drop_down(ids!(custom_sender_security_dropdown));
+            let custom_sender_profile_id_input =
+                self.view.text_input(ids!(custom_sender_profile_id_input));
+            let custom_sender_name_input =
+                self.view.text_input(ids!(custom_sender_name_input));
+            let custom_sender_homeserver_input =
+                self.view.text_input(ids!(custom_sender_homeserver_input));
+            let custom_sender_user_id_input =
+                self.view.text_input(ids!(custom_sender_user_id_input));
+            let custom_sender_device_id_input =
+                self.view.text_input(ids!(custom_sender_device_id_input));
+            let custom_sender_access_token_env_input = self
+                .view
+                .text_input(ids!(custom_sender_access_token_env_input));
+            let custom_sender_password_input =
+                self.view.text_input(ids!(custom_sender_password_input));
 
             if runtimes_section_button.clicked(actions) {
                 self.set_section(cx, BotfatherSettingsSection::Runtimes);
@@ -1103,6 +1574,136 @@ impl Widget for BotfatherSettings {
                     Cx::post_action(BotfatherAction::Status(status));
                 });
             }
+            if let Some(selected_index) = custom_sender_selector_dropdown.selected(actions) {
+                let sender_profile_id = self
+                    .custom_sender_choice_ids
+                    .get(selected_index)
+                    .cloned()
+                    .unwrap_or_default();
+                if sender_profile_id.is_empty() {
+                    self.load_custom_sender_form(cx, None);
+                } else {
+                    self.load_custom_sender_form(cx, Some(&sender_profile_id));
+                    self.set_status(
+                        cx,
+                        &format!("Loaded sender profile `{sender_profile_id}`."),
+                    );
+                }
+            }
+            if let Some(selected_index) = custom_sender_security_dropdown.selected(actions) {
+                self.selected_custom_sender_security =
+                    sender_security_level_from_index(selected_index);
+            }
+            if new_custom_sender_button.clicked(actions) {
+                self.load_custom_sender_form(cx, None);
+                self.set_status(cx, "Preparing a new sender profile.");
+            }
+            if save_custom_sender_button.clicked(actions) {
+                let sender_profile_id = custom_sender_profile_id_input.text();
+                let normalized_sender_profile_id =
+                    normalize_sender_profile_id_input(&sender_profile_id);
+                match botfather::save_sender_profile(
+                    &sender_profile_id,
+                    &custom_sender_name_input.text(),
+                    self.selected_custom_sender_security,
+                    &custom_sender_homeserver_input.text(),
+                    &custom_sender_user_id_input.text(),
+                    &custom_sender_device_id_input.text(),
+                    &custom_sender_access_token_env_input.text(),
+                ) {
+                    Ok(message) => {
+                        self.selected_custom_sender_profile_id =
+                            (!normalized_sender_profile_id.is_empty())
+                                .then_some(normalized_sender_profile_id);
+                        self.populate(cx, None);
+                        self.set_status(cx, &message);
+                    }
+                    Err(error) => self.set_status(cx, &error),
+                }
+            }
+            if verify_custom_sender_button.clicked(actions) {
+                let sender_profile_id =
+                    normalize_sender_profile_id_input(&custom_sender_profile_id_input.text());
+                let sender_name = custom_sender_name_input.text();
+                let homeserver = custom_sender_homeserver_input.text();
+                let user_id = custom_sender_user_id_input.text();
+                let device_id = custom_sender_device_id_input.text();
+                let password = custom_sender_password_input.text();
+                let access_token_env = custom_sender_access_token_env_input.text();
+                let security = self.selected_custom_sender_security;
+                self.selected_custom_sender_profile_id =
+                    (!sender_profile_id.is_empty()).then_some(sender_profile_id.clone());
+                self.set_status(cx, "Saving and verifying custom sender login...");
+                spawn_on_tokio(async move {
+                    let status = match botfather::save_sender_profile(
+                        &sender_profile_id,
+                        &sender_name,
+                        security,
+                        &homeserver,
+                        &user_id,
+                        &device_id,
+                        &access_token_env,
+                    ) {
+                        Ok(_) => match botfather::sender::verify_sender_login(
+                            &sender_profile_id,
+                            &homeserver,
+                            &user_id,
+                            &password,
+                        )
+                        .await
+                        {
+                            Ok(session) => match botfather::save_verified_sender_session(
+                                &sender_profile_id,
+                                &homeserver,
+                                &session.matrix_user_id,
+                                &session.device_id,
+                                &session.access_token,
+                                &access_token_env,
+                            ) {
+                                Ok(message) => message,
+                                Err(error) => error,
+                            },
+                            Err(error) => {
+                                let _ = botfather::record_sender_verification_failure(
+                                    &sender_profile_id,
+                                    &homeserver,
+                                    &user_id,
+                                    &access_token_env,
+                                    &error,
+                                );
+                                error
+                            }
+                        },
+                        Err(error) => error,
+                    };
+                    Cx::post_action(BotfatherAction::Status(status));
+                });
+            }
+            if set_default_custom_sender_button.clicked(actions) {
+                let sender_profile_id =
+                    normalize_sender_profile_id_input(&custom_sender_profile_id_input.text());
+                match botfather::set_default_room_sender_profile(&sender_profile_id) {
+                    Ok(message) => {
+                        self.selected_custom_sender_profile_id =
+                            (!sender_profile_id.is_empty()).then_some(sender_profile_id);
+                        self.populate(cx, None);
+                        self.set_status(cx, &message);
+                    }
+                    Err(error) => self.set_status(cx, &error),
+                }
+            }
+            if delete_custom_sender_button.clicked(actions) {
+                let sender_profile_id =
+                    normalize_sender_profile_id_input(&custom_sender_profile_id_input.text());
+                match botfather::delete_sender_profile(&sender_profile_id) {
+                    Ok(message) => {
+                        self.selected_custom_sender_profile_id = None;
+                        self.populate(cx, None);
+                        self.set_status(cx, &message);
+                    }
+                    Err(error) => self.set_status(cx, &error),
+                }
+            }
             if room_stream_mode_toggle.clicked(actions) {
                 let enable_preview = !botfather::room_stream_preview_enabled();
                 match botfather::set_room_stream_preview_enabled(enable_preview) {
@@ -1188,6 +1789,23 @@ impl Widget for BotfatherSettings {
                 {
                     self.focus_sender_profile(cx, &sender_profile_id);
                 }
+                if let SenderEntryAction::Manage(sender_profile_id) =
+                    action.as_widget_action().cast()
+                {
+                    self.focus_sender_profile(cx, &sender_profile_id);
+                }
+                if let SenderEntryAction::MakeDefault(sender_profile_id) =
+                    action.as_widget_action().cast()
+                {
+                    match botfather::set_default_room_sender_profile(&sender_profile_id) {
+                        Ok(message) => {
+                            self.selected_custom_sender_profile_id = Some(sender_profile_id);
+                            self.populate(cx, None);
+                            self.set_status(cx, &message);
+                        }
+                        Err(error) => self.set_status(cx, &error),
+                    }
+                }
                 if let BindingEntryAction::Unbind(room_id) = action.as_widget_action().cast() {
                     match botfather::unbind_room(&room_id) {
                         Ok(()) => {
@@ -1202,23 +1820,49 @@ impl Widget for BotfatherSettings {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        while let Some(subview) = self.view.draw_walk(cx, scope, walk).step() {
-            let filtered_entries = self.filtered_binding_entries();
-            self.view
-                .label(ids!(bindings_empty_label))
-                .set_visible(cx, filtered_entries.is_empty());
+        let bindings_list_uid = self.view.widget(ids!(bindings_list)).widget_uid();
+        let sender_directory_list_uid = self.view.widget(ids!(sender_directory_list)).widget_uid();
 
-            let flat_list_ref = subview.as_flat_list();
-            let Some(mut list) = flat_list_ref.borrow_mut() else {
-                continue;
-            };
-            for entry in filtered_entries {
-                let item_id = LiveId::from_str(&entry.room_id);
-                let Some(item) = list.item(cx, item_id, id!(binding_entry)) else {
+        while let Some(subview) = self.view.draw_walk(cx, scope, walk).step() {
+            let subview_uid = subview.widget_uid();
+            if subview_uid == bindings_list_uid {
+                let filtered_entries = self.filtered_binding_entries();
+                self.view
+                    .label(ids!(bindings_empty_label))
+                    .set_visible(cx, filtered_entries.is_empty());
+
+                let flat_list_ref = subview.as_flat_list();
+                let Some(mut list) = flat_list_ref.borrow_mut() else {
                     continue;
                 };
-                let mut item_scope = Scope::with_props(&entry);
-                item.draw_all(cx, &mut item_scope);
+                for entry in filtered_entries {
+                    let item_id = LiveId::from_str(&entry.room_id);
+                    let Some(item) = list.item(cx, item_id, id!(binding_entry)) else {
+                        continue;
+                    };
+                    let mut item_scope = Scope::with_props(&entry);
+                    item.draw_all(cx, &mut item_scope);
+                }
+                continue;
+            }
+
+            if subview_uid == sender_directory_list_uid {
+                self.view
+                    .label(ids!(sender_directory_empty_label))
+                    .set_visible(cx, self.sender_directory_entries.is_empty());
+
+                let flat_list_ref = subview.as_flat_list();
+                let Some(mut list) = flat_list_ref.borrow_mut() else {
+                    continue;
+                };
+                for entry in &self.sender_directory_entries {
+                    let item_id = LiveId::from_str(&entry.sender_profile_id);
+                    let Some(item) = list.item(cx, item_id, id!(sender_entry)) else {
+                        continue;
+                    };
+                    let mut item_scope = Scope::with_props(entry);
+                    item.draw_all(cx, &mut item_scope);
+                }
             }
         }
         DrawStep::done()
@@ -1287,15 +1931,13 @@ impl BotfatherSettings {
             .label(ids!(bots_summary_label))
             .set_text(cx, &botfather::bots_overview());
         self.view
-            .label(ids!(current_sender_summary_label))
-            .set_text(cx, &botfather::sender_profile_summary("current-user"));
-        self.view
             .label(ids!(shared_sender_summary_label))
             .set_text(cx, &botfather::sender_profile_summary("shared-bot-sender"));
         self.view.label(ids!(secure_sender_summary_label)).set_text(
             cx,
             &botfather::sender_profile_summary("secure-room-bot-sender"),
         );
+        self.sender_directory_entries = botfather::sender_directory_entries();
         self.binding_entries = botfather::explicit_room_binding_entries();
         self.view
             .label(ids!(bindings_stats_label))
@@ -1329,6 +1971,7 @@ impl BotfatherSettings {
             cx,
             preview_enabled,
         );
+        self.refresh_custom_sender_manager(cx);
 
         self.apply_section_state(cx);
         self.apply_bindings_filter_style(cx);
@@ -1337,6 +1980,10 @@ impl BotfatherSettings {
     fn clear(&mut self, cx: &mut Cx) {
         self.binding_entries.clear();
         self.bindings_filter = BindingsFilter::All;
+        self.custom_sender_choice_ids.clear();
+        self.selected_custom_sender_profile_id = None;
+        self.selected_custom_sender_security = SenderSecurityLevel::Standard;
+        self.sender_directory_entries.clear();
         for input in [
             ids!(crew_endpoint_input),
             ids!(crew_auth_token_env_input),
@@ -1353,6 +2000,13 @@ impl BotfatherSettings {
             ids!(secure_sender_device_id_input),
             ids!(secure_sender_access_token_env_input),
             ids!(secure_sender_password_input),
+            ids!(custom_sender_profile_id_input),
+            ids!(custom_sender_name_input),
+            ids!(custom_sender_homeserver_input),
+            ids!(custom_sender_user_id_input),
+            ids!(custom_sender_device_id_input),
+            ids!(custom_sender_access_token_env_input),
+            ids!(custom_sender_password_input),
         ] {
             self.view.text_input(input).set_text(cx, "");
         }
@@ -1361,9 +2015,9 @@ impl BotfatherSettings {
             ids!(crew_runtime_summary_label),
             ids!(openclaw_runtime_summary_label),
             ids!(bots_summary_label),
-            ids!(current_sender_summary_label),
             ids!(shared_sender_summary_label),
             ids!(secure_sender_summary_label),
+            ids!(selected_custom_sender_summary_label),
             ids!(bindings_stats_label),
             ids!(room_stream_mode_summary_label),
             ids!(command_hint_label),
@@ -1511,6 +2165,124 @@ impl BotfatherSettings {
         );
     }
 
+    fn refresh_custom_sender_manager(&mut self, cx: &mut Cx) {
+        let dropdown = self.view.drop_down(ids!(custom_sender_selector_dropdown));
+        let mut choice_ids = vec![String::new()];
+        let mut labels = vec!["Create New Sender".to_string()];
+
+        for option in botfather::sender_profile_options().into_iter().filter(|option| {
+            !matches!(
+                option.sender_profile_id.as_str(),
+                "current-user" | "shared-bot-sender" | "secure-room-bot-sender"
+            )
+        }) {
+            choice_ids.push(option.sender_profile_id);
+            labels.push(option.label);
+        }
+
+        self.custom_sender_choice_ids = choice_ids;
+        dropdown.set_labels(cx, labels);
+
+        let selected_index = self
+            .selected_custom_sender_profile_id
+            .as_ref()
+            .and_then(|sender_profile_id| {
+                self.custom_sender_choice_ids
+                    .iter()
+                    .position(|candidate| candidate == sender_profile_id)
+            })
+            .unwrap_or(0);
+        dropdown.set_selected_item(cx, selected_index);
+
+        let sender_profile_id = self
+            .custom_sender_choice_ids
+            .get(selected_index)
+            .cloned()
+            .unwrap_or_default();
+        if sender_profile_id.is_empty() {
+            self.load_custom_sender_form(cx, None);
+        } else {
+            self.load_custom_sender_form(cx, Some(&sender_profile_id));
+        }
+    }
+
+    fn load_custom_sender_form(&mut self, cx: &mut Cx, sender_profile_id: Option<&str>) {
+        let security_dropdown = self.view.drop_down(ids!(custom_sender_security_dropdown));
+        security_dropdown.set_labels(cx, sender_security_level_labels());
+
+        match sender_profile_id.and_then(botfather::sender_profile_form) {
+            Some(form) => {
+                self.selected_custom_sender_profile_id = Some(form.sender_profile_id.clone());
+                self.selected_custom_sender_security = form.security;
+                self.view
+                    .text_input(ids!(custom_sender_profile_id_input))
+                    .set_text(cx, &form.sender_profile_id);
+                self.view
+                    .text_input(ids!(custom_sender_name_input))
+                    .set_text(cx, &form.name);
+                self.view
+                    .text_input(ids!(custom_sender_homeserver_input))
+                    .set_text(cx, &form.homeserver_url);
+                self.view
+                    .text_input(ids!(custom_sender_user_id_input))
+                    .set_text(cx, &form.matrix_user_id);
+                self.view
+                    .text_input(ids!(custom_sender_device_id_input))
+                    .set_text(cx, &form.device_id);
+                self.view
+                    .text_input(ids!(custom_sender_access_token_env_input))
+                    .set_text(cx, &form.access_token_env);
+                self.view
+                    .text_input(ids!(custom_sender_password_input))
+                    .set_text(cx, "");
+                self.view
+                    .label(ids!(selected_custom_sender_summary_label))
+                    .set_text(cx, &botfather::sender_profile_summary(&form.sender_profile_id));
+                self.view
+                    .button(ids!(delete_custom_sender_button))
+                    .set_enabled(cx, form.can_delete);
+                security_dropdown
+                    .set_selected_item(cx, sender_security_level_index(form.security));
+            }
+            None => {
+                self.selected_custom_sender_profile_id = None;
+                self.selected_custom_sender_security = SenderSecurityLevel::Standard;
+                self.view
+                    .text_input(ids!(custom_sender_profile_id_input))
+                    .set_text(cx, "");
+                self.view
+                    .text_input(ids!(custom_sender_name_input))
+                    .set_text(cx, "");
+                self.view
+                    .text_input(ids!(custom_sender_homeserver_input))
+                    .set_text(cx, "");
+                self.view
+                    .text_input(ids!(custom_sender_user_id_input))
+                    .set_text(cx, "");
+                self.view
+                    .text_input(ids!(custom_sender_device_id_input))
+                    .set_text(cx, "");
+                self.view
+                    .text_input(ids!(custom_sender_access_token_env_input))
+                    .set_text(cx, "");
+                self.view
+                    .text_input(ids!(custom_sender_password_input))
+                    .set_text(cx, "");
+                self.view
+                    .label(ids!(selected_custom_sender_summary_label))
+                    .set_text(
+                        cx,
+                        "Create a sender profile, save it, then verify login to store a sender session.",
+                    );
+                self.view
+                    .button(ids!(delete_custom_sender_button))
+                    .set_enabled(cx, false);
+                security_dropdown
+                    .set_selected_item(cx, sender_security_level_index(SenderSecurityLevel::Standard));
+            }
+        }
+    }
+
     fn filtered_binding_entries(&self) -> Vec<botfather::ExplicitRoomBindingEntry> {
         self.binding_entries
             .iter()
@@ -1534,7 +2306,10 @@ impl BotfatherSettings {
                 self.shared_sender_expanded = false;
                 self.secure_sender_expanded = true;
             }
-            _ => {}
+            _ => {
+                self.selected_custom_sender_profile_id = Some(sender_profile_id.to_string());
+                self.refresh_custom_sender_manager(cx);
+            }
         }
         self.apply_runtime_cards_state(cx);
         self.set_status(
@@ -1542,6 +2317,34 @@ impl BotfatherSettings {
             &format!("Focused sender profile `{sender_profile_id}` in Senders."),
         );
     }
+}
+
+fn sender_security_level_labels() -> Vec<String> {
+    vec![
+        "Standard".to_string(),
+        "Elevated".to_string(),
+        "Isolated".to_string(),
+    ]
+}
+
+fn sender_security_level_index(security: SenderSecurityLevel) -> usize {
+    match security {
+        SenderSecurityLevel::Standard => 0,
+        SenderSecurityLevel::Elevated => 1,
+        SenderSecurityLevel::Isolated => 2,
+    }
+}
+
+fn sender_security_level_from_index(index: usize) -> SenderSecurityLevel {
+    match index {
+        1 => SenderSecurityLevel::Elevated,
+        2 => SenderSecurityLevel::Isolated,
+        _ => SenderSecurityLevel::Standard,
+    }
+}
+
+fn normalize_sender_profile_id_input(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
 }
 
 fn apply_section_button_style(button: &ButtonRef, cx: &mut Cx, active: bool) {

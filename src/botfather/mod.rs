@@ -13,11 +13,11 @@ use makepad_widgets::{Cx, error};
 use matrix_sdk::send_queue::SendHandle;
 use robrix_botfather::{
     BindingSource, BotBinding, BotDefinition, BotEvent, BotRuntime, BotRuntimeOverride,
-    BotfatherDefaults, BotfatherManager, BotfatherState, DeliveryTarget, DispatchPolicy,
-    InventorySnapshot, OpenClawRuntimeConfig, PermissionPolicy, ResolveError, RoomInventory,
-    RuntimeConfig, RuntimeKind, RuntimeProfile, SenderProfile, SenderProfileKind,
-    SenderSecurityLevel, SpaceInventory, StateStore, TriggerMode, TriggerPolicy, UserSnapshot,
-    Workspace, resolve_room_bot, resolve_room_bots, runtime_feature_enabled,
+    BotfatherManager, BotfatherState, DeliveryTarget, DispatchPolicy, InventorySnapshot,
+    OpenClawRuntimeConfig, PermissionPolicy, ResolveError, RoomInventory, RuntimeConfig,
+    RuntimeKind, RuntimeProfile, SenderProfile, SenderProfileKind, SenderSecurityLevel,
+    SpaceInventory, StateStore, TriggerMode, TriggerPolicy, UserSnapshot, Workspace,
+    resolve_room_bot, resolve_room_bots, runtime_feature_enabled,
 };
 
 use crate::{
@@ -142,6 +142,33 @@ pub struct SenderOption {
     pub kind: SenderProfileKind,
     pub security: SenderSecurityLevel,
     pub ready: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SenderProfileForm {
+    pub sender_profile_id: String,
+    pub name: String,
+    pub homeserver_url: String,
+    pub matrix_user_id: String,
+    pub device_id: String,
+    pub access_token_env: String,
+    pub security: SenderSecurityLevel,
+    pub is_default_room_sender: bool,
+    pub can_delete: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SenderDirectoryEntry {
+    pub sender_profile_id: String,
+    pub name: String,
+    pub kind: String,
+    pub security: String,
+    pub target: String,
+    pub verification: String,
+    pub room_access: String,
+    pub ready: bool,
+    pub is_default: bool,
+    pub can_set_default: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -557,11 +584,9 @@ pub fn save_default_profiles(
             "Isolated Matrix bot sender intended for higher-security rooms.",
         );
 
-        ctx.state.defaults = BotfatherDefaults {
-            bot_ids: default_bot_ids(&ctx.state),
-            default_sender_profile_id: Some(DEFAULT_CURRENT_USER_SENDER_ID.to_string()),
-            room_stream_preview_enabled: ctx.state.defaults.room_stream_preview_enabled,
-        };
+        cleanup_orphan_sender_references(&mut ctx.state);
+        sync_preferred_sender_defaults(&mut ctx.state);
+        ctx.state.defaults.bot_ids = default_bot_ids(&ctx.state);
         cleanup_orphan_bindings(&mut ctx.state);
         ctx.store
             .save(&ctx.state)
@@ -704,21 +729,72 @@ pub fn sender_profiles_overview() -> String {
         return "BotFather state is not loaded.".into();
     };
 
-    if state.sender_profiles.is_empty() {
-        return "No sender profiles are configured yet.".into();
+    let mut lines = state
+        .sender_profiles
+        .values()
+        .filter(|profile| profile.enabled)
+        .map(|profile| {
+            let default_tag = if state.defaults.default_sender_profile_id.as_deref()
+                == Some(profile.id.as_str())
+            {
+                " [default room sender]"
+            } else {
+                ""
+            };
+            format!(
+                "- {} ({}){} | {} | {}\n  target: {}\n  verification: {}",
+                profile.name,
+                profile.id,
+                default_tag,
+                sender_kind_label(profile.kind),
+                sender_security_label(profile.security),
+                sender_profile_target_summary(profile),
+                sender_verification_summary(profile),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        lines.push("No sender profiles are configured yet.".into());
     }
 
-    let mut lines = Vec::new();
-    for profile in state.sender_profiles.values() {
-        lines.push(format!(
-            "- {} [{} / {}] -> {}",
-            profile.name,
-            sender_kind_label(profile.kind),
-            sender_security_label(profile.security),
-            sender_profile_target_summary(profile),
-        ));
-    }
+    lines.push(
+        "Room access: Robrix does not auto-join Matrix bot senders. Invite the bot account first, or manually join it in public rooms before binding it here.".into(),
+    );
     lines.join("\n")
+}
+
+pub fn sender_directory_entries() -> Vec<SenderDirectoryEntry> {
+    let Some(state) = snapshot() else {
+        return Vec::new();
+    };
+
+    let mut entries = state
+        .sender_profiles
+        .values()
+        .filter(|profile| profile.enabled && !profile.uses_current_user())
+        .map(|profile| SenderDirectoryEntry {
+            sender_profile_id: profile.id.clone(),
+            name: profile.name.clone(),
+            kind: sender_kind_label(profile.kind).to_string(),
+            security: sender_security_label(profile.security).to_string(),
+            target: sender_profile_target_summary(profile),
+            verification: sender_verification_summary(profile),
+            room_access: sender_room_access_summary(profile).to_string(),
+            ready: sender_profile_ready(profile),
+            is_default: state.defaults.default_sender_profile_id.as_deref()
+                == Some(profile.id.as_str()),
+            can_set_default: profile.security != SenderSecurityLevel::Isolated,
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|lhs, rhs| {
+        rhs.is_default
+            .cmp(&lhs.is_default)
+            .then_with(|| lhs.name.cmp(&rhs.name))
+            .then_with(|| lhs.sender_profile_id.cmp(&rhs.sender_profile_id))
+    });
+    entries
 }
 
 pub fn status_overview(room_id: Option<&str>) -> String {
@@ -1043,7 +1119,10 @@ pub fn save_verified_sender_session(
         let existing = ctx.state.sender_profiles.get(sender_profile_id).cloned();
         let sender_profile = SenderProfile {
             id: sender_profile_id.to_string(),
-            name: blueprint.name.to_string(),
+            name: existing
+                .as_ref()
+                .map(|profile| profile.name.clone())
+                .unwrap_or_else(|| blueprint.name.to_string()),
             enabled: true,
             kind: SenderProfileKind::MatrixBot,
             matrix_user_id: Some(matrix_user_id.trim().to_string()),
@@ -1057,18 +1136,29 @@ pub fn save_verified_sender_session(
             access_token: Some(access_token.to_string()),
             last_verified_at_millis: Some(verified_at),
             last_verification_error: None,
-            security: blueprint.security,
-            description: Some(blueprint.description.to_string()),
+            security: existing
+                .as_ref()
+                .map(|profile| profile.security)
+                .unwrap_or(blueprint.security),
+            description: existing
+                .as_ref()
+                .and_then(|profile| profile.description.clone())
+                .or_else(|| Some(blueprint.description.to_string())),
         };
         ctx.state
             .sender_profiles
             .insert(sender_profile_id.to_string(), sender_profile);
+        sync_preferred_sender_defaults(&mut ctx.state);
         ctx.store
             .save(&ctx.state)
             .map_err(|error| error.to_string())?;
         Ok(format!(
             "Verified sender \"{}\" as {}.",
-            blueprint.name, matrix_user_id
+            existing
+                .as_ref()
+                .map(|profile| profile.name.as_str())
+                .unwrap_or(blueprint.name),
+            matrix_user_id
         ))
     })?;
 
@@ -1089,7 +1179,10 @@ pub fn record_sender_verification_failure(
         let existing = ctx.state.sender_profiles.get(sender_profile_id).cloned();
         let sender_profile = SenderProfile {
             id: sender_profile_id.to_string(),
-            name: blueprint.name.to_string(),
+            name: existing
+                .as_ref()
+                .map(|profile| profile.name.clone())
+                .unwrap_or_else(|| blueprint.name.to_string()),
             enabled: true,
             kind: SenderProfileKind::MatrixBot,
             matrix_user_id: non_empty(matrix_user_id).or_else(|| {
@@ -1117,18 +1210,177 @@ pub fn record_sender_verification_failure(
                 .as_ref()
                 .and_then(|profile| profile.last_verified_at_millis),
             last_verification_error: Some(error.to_string()),
-            security: blueprint.security,
-            description: Some(blueprint.description.to_string()),
+            security: existing
+                .as_ref()
+                .map(|profile| profile.security)
+                .unwrap_or(blueprint.security),
+            description: existing
+                .as_ref()
+                .and_then(|profile| profile.description.clone())
+                .or_else(|| Some(blueprint.description.to_string())),
         };
         ctx.state
             .sender_profiles
             .insert(sender_profile_id.to_string(), sender_profile);
+        sync_preferred_sender_defaults(&mut ctx.state);
         ctx.store
             .save(&ctx.state)
             .map_err(|error| error.to_string())
     })?;
     Cx::post_action(BotfatherAction::StateChanged);
     Ok(())
+}
+
+pub fn sender_profile_form(sender_profile_id: &str) -> Option<SenderProfileForm> {
+    let state = snapshot()?;
+    let profile = state.sender_profiles.get(sender_profile_id)?;
+    Some(SenderProfileForm {
+        sender_profile_id: profile.id.clone(),
+        name: profile.name.clone(),
+        homeserver_url: sender_homeserver(Some(profile)),
+        matrix_user_id: sender_user_id(Some(profile)),
+        device_id: sender_device_id(Some(profile)),
+        access_token_env: sender_access_token_env(Some(profile)),
+        security: profile.security,
+        is_default_room_sender: state.defaults.default_sender_profile_id.as_deref()
+            == Some(profile.id.as_str()),
+        can_delete: !is_builtin_sender_profile_id(&profile.id),
+    })
+}
+
+pub fn save_sender_profile(
+    sender_profile_id: &str,
+    name: &str,
+    security: SenderSecurityLevel,
+    homeserver_url: &str,
+    matrix_user_id: &str,
+    device_id: &str,
+    access_token_env: &str,
+) -> Result<String, String> {
+    ensure_loaded_for_current_user()?;
+
+    let sender_profile_id = normalize_identifier(sender_profile_id)?;
+    if sender_profile_id == DEFAULT_CURRENT_USER_SENDER_ID {
+        return Err("The current-user sender is managed automatically.".into());
+    }
+
+    let name = non_empty(name).unwrap_or_else(|| display_name_from_identifier(&sender_profile_id));
+    let homeserver_url = non_empty(homeserver_url)
+        .ok_or_else(|| "Sender homeserver URL cannot be empty.".to_string())?;
+    let matrix_user_id = non_empty(matrix_user_id)
+        .ok_or_else(|| "Sender Matrix user ID cannot be empty.".to_string())?;
+
+    let message = with_context_mut(|ctx| {
+        let existing = ctx.state.sender_profiles.get(&sender_profile_id).cloned();
+        let sender_profile = SenderProfile {
+            id: sender_profile_id.clone(),
+            name: name.clone(),
+            enabled: true,
+            kind: SenderProfileKind::MatrixBot,
+            matrix_user_id: Some(matrix_user_id.clone()),
+            homeserver_url: Some(homeserver_url.clone()),
+            device_id: non_empty(device_id)
+                .or_else(|| existing.as_ref().and_then(|profile| profile.device_id.clone())),
+            access_token_env: non_empty(access_token_env).or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|profile| profile.access_token_env.clone())
+            }),
+            access_token: existing
+                .as_ref()
+                .and_then(|profile| profile.access_token.clone()),
+            last_verified_at_millis: existing
+                .as_ref()
+                .and_then(|profile| profile.last_verified_at_millis),
+            last_verification_error: existing
+                .as_ref()
+                .and_then(|profile| profile.last_verification_error.clone()),
+            security,
+            description: existing
+                .as_ref()
+                .and_then(|profile| profile.description.clone())
+                .or_else(|| Some(default_sender_profile_description(security))),
+        };
+
+        ctx.state
+            .sender_profiles
+            .insert(sender_profile_id.clone(), sender_profile);
+        cleanup_orphan_sender_references(&mut ctx.state);
+        sync_preferred_sender_defaults(&mut ctx.state);
+        ctx.store
+            .save(&ctx.state)
+            .map_err(|error| error.to_string())?;
+        Ok(format!("Saved sender profile \"{}\" ({}).", name, sender_profile_id))
+    })?;
+
+    Cx::post_action(BotfatherAction::StateChanged);
+    Ok(message)
+}
+
+pub fn delete_sender_profile(sender_profile_id: &str) -> Result<String, String> {
+    ensure_loaded_for_current_user()?;
+    if is_builtin_sender_profile_id(sender_profile_id) {
+        return Err(
+            "Built-in sender profiles are removed from the main Sender cards instead.".into(),
+        );
+    }
+
+    let message = with_context_mut(|ctx| {
+        let Some(profile) = ctx.state.sender_profiles.remove(sender_profile_id) else {
+            return Err(format!("Sender profile `{sender_profile_id}` does not exist."));
+        };
+        cleanup_orphan_sender_references(&mut ctx.state);
+        sync_preferred_sender_defaults(&mut ctx.state);
+        ctx.store
+            .save(&ctx.state)
+            .map_err(|error| error.to_string())?;
+        Ok(format!("Deleted sender profile \"{}\".", profile.name))
+    })?;
+
+    Cx::post_action(BotfatherAction::StateChanged);
+    Ok(message)
+}
+
+pub fn set_default_room_sender_profile(sender_profile_id: &str) -> Result<String, String> {
+    ensure_loaded_for_current_user()?;
+    let message = with_context_mut(|ctx| {
+        let Some(profile) = ctx.state.sender_profiles.get(sender_profile_id).cloned() else {
+            return Err(format!("Sender profile `{sender_profile_id}` does not exist."));
+        };
+        if profile.security == SenderSecurityLevel::Isolated
+            && profile.kind != SenderProfileKind::CurrentUser
+        {
+            return Err(
+                "Isolated sender profiles should be bound per room, not used as the default room sender."
+                    .into(),
+            );
+        }
+
+        let previous_default = ctx.state.defaults.default_sender_profile_id.clone();
+        ctx.state.defaults.default_sender_profile_id = Some(profile.id.clone());
+        for bot in ctx.state.bots.values_mut() {
+            if bot
+                .default_sender_profile_id
+                .as_deref()
+                .is_none_or(|existing| {
+                    existing == DEFAULT_CURRENT_USER_SENDER_ID
+                        || previous_default.as_deref() == Some(existing)
+                })
+            {
+                bot.default_sender_profile_id = Some(profile.id.clone());
+            }
+        }
+        ctx.store
+            .save(&ctx.state)
+            .map_err(|error| error.to_string())?;
+        Ok(format!(
+            "Default room sender is now \"{}\".",
+            profile.name
+        ))
+    })?;
+
+    Cx::post_action(BotfatherAction::StateChanged);
+    Ok(message)
 }
 
 pub fn room_stream_preview(
@@ -1298,13 +1550,14 @@ pub fn create_bot(
         }
 
         let bot_name = display_name_from_identifier(&bot_id);
+        let default_sender_profile_id = preferred_default_room_sender_profile_id(&ctx.state);
         ctx.state.bots.insert(
             bot_id.clone(),
             BotDefinition {
                 id: bot_id.clone(),
                 name: bot_name.clone(),
                 runtime_profile_id: runtime_profile_id.clone(),
-                default_sender_profile_id: Some(DEFAULT_CURRENT_USER_SENDER_ID.to_string()),
+                default_sender_profile_id: Some(default_sender_profile_id),
                 priority: 0,
                 enabled: true,
                 trigger: TriggerPolicy {
@@ -1636,13 +1889,14 @@ pub fn sender_profile_summary(sender_profile_id: &str) -> String {
         return format!("Sender profile `{sender_profile_id}` is not configured yet.");
     };
     format!(
-        "sender: {}\nkind: {}\nsecurity: {}\ntarget: {}\nmode: {}\nverification: {}",
+        "sender: {}\nkind: {}\nsecurity: {}\ntarget: {}\nmode: {}\nverification: {}\nroom access: {}",
         profile.name,
         sender_kind_label(profile.kind),
         sender_security_label(profile.security),
         sender_profile_target_summary(profile),
         sender_mode_label(profile),
         sender_verification_summary(profile),
+        sender_room_access_summary(profile),
     )
 }
 
@@ -2297,15 +2551,8 @@ fn sync_builtin_sender_profiles(state: &mut BotfatherState) {
             description: Some("Uses the logged-in Robrix Matrix account.".into()),
         },
     );
-
-    if state.defaults.default_sender_profile_id.is_none() {
-        state.defaults.default_sender_profile_id = Some(DEFAULT_CURRENT_USER_SENDER_ID.to_string());
-    }
-    for bot in state.bots.values_mut() {
-        if bot.default_sender_profile_id.is_none() {
-            bot.default_sender_profile_id = Some(DEFAULT_CURRENT_USER_SENDER_ID.to_string());
-        }
-    }
+    cleanup_orphan_sender_references(state);
+    sync_preferred_sender_defaults(state);
 }
 
 fn upsert_optional_sender_profile(
@@ -2386,6 +2633,158 @@ fn sender_access_token_env(profile: Option<&SenderProfile>) -> String {
     profile
         .and_then(|profile| profile.access_token_env.clone())
         .unwrap_or_default()
+}
+
+fn is_builtin_sender_profile_id(sender_profile_id: &str) -> bool {
+    matches!(
+        sender_profile_id,
+        DEFAULT_CURRENT_USER_SENDER_ID
+            | DEFAULT_SHARED_BOT_SENDER_ID
+            | DEFAULT_SECURE_BOT_SENDER_ID
+    )
+}
+
+fn sender_room_access_summary(profile: &SenderProfile) -> &'static str {
+    match profile.kind {
+        SenderProfileKind::CurrentUser => {
+            "Uses Robrix's primary Matrix session for rooms you already joined."
+        }
+        SenderProfileKind::MatrixBot => {
+            "No auto-join. Invite this bot account first, or join it manually before sending."
+        }
+    }
+}
+
+fn default_sender_profile_description(security: SenderSecurityLevel) -> String {
+    match security {
+        SenderSecurityLevel::Standard => {
+            "Shared Matrix bot sender used across standard rooms.".into()
+        }
+        SenderSecurityLevel::Elevated => "Matrix bot sender configured from Robrix.".into(),
+        SenderSecurityLevel::Isolated => {
+            "Isolated Matrix bot sender intended for higher-security rooms.".into()
+        }
+    }
+}
+
+fn preferred_default_room_sender_profile_id(state: &BotfatherState) -> String {
+    if state
+        .sender_profiles
+        .get(DEFAULT_SHARED_BOT_SENDER_ID)
+        .is_some_and(sender_profile_ready)
+    {
+        return DEFAULT_SHARED_BOT_SENDER_ID.to_string();
+    }
+
+    state
+        .sender_profiles
+        .values()
+        .filter(|profile| {
+            profile.enabled
+                && !profile.uses_current_user()
+                && profile.security != SenderSecurityLevel::Isolated
+                && sender_profile_ready(profile)
+        })
+        .map(|profile| profile.id.clone())
+        .next()
+        .unwrap_or_else(|| DEFAULT_CURRENT_USER_SENDER_ID.to_string())
+}
+
+fn sync_preferred_sender_defaults(state: &mut BotfatherState) {
+    let preferred_default = preferred_default_room_sender_profile_id(state);
+    let existing_sender_ids = state
+        .sender_profiles
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if state
+        .defaults
+        .default_sender_profile_id
+        .as_deref()
+        .is_none_or(|sender_profile_id| {
+            sender_profile_id == DEFAULT_CURRENT_USER_SENDER_ID
+                || !existing_sender_ids
+                    .iter()
+                    .any(|candidate| candidate == sender_profile_id)
+        })
+    {
+        state.defaults.default_sender_profile_id = Some(preferred_default.clone());
+    }
+
+    for bot in state.bots.values_mut() {
+        if bot
+            .default_sender_profile_id
+            .as_deref()
+            .is_none_or(|sender_profile_id| {
+                sender_profile_id == DEFAULT_CURRENT_USER_SENDER_ID
+                    || !existing_sender_ids
+                        .iter()
+                        .any(|candidate| candidate == sender_profile_id)
+            })
+        {
+            bot.default_sender_profile_id = Some(preferred_default.clone());
+        }
+    }
+}
+
+fn cleanup_orphan_sender_references(state: &mut BotfatherState) {
+    let existing_sender_ids = state
+        .sender_profiles
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if state
+        .defaults
+        .default_sender_profile_id
+        .as_deref()
+        .is_some_and(|sender_profile_id| {
+            !existing_sender_ids.iter().any(|candidate| candidate == sender_profile_id)
+        })
+    {
+        state.defaults.default_sender_profile_id = None;
+    }
+
+    for bot in state.bots.values_mut() {
+        if bot
+            .default_sender_profile_id
+            .as_deref()
+            .is_some_and(|sender_profile_id| {
+                !existing_sender_ids.iter().any(|candidate| candidate == sender_profile_id)
+            })
+        {
+            bot.default_sender_profile_id = None;
+        }
+    }
+
+    for bindings in state.room_bindings.values_mut() {
+        for binding in bindings.iter_mut() {
+            if binding
+                .sender_profile_id
+                .as_deref()
+                .is_some_and(|sender_profile_id| {
+                    !existing_sender_ids.iter().any(|candidate| candidate == sender_profile_id)
+                })
+            {
+                binding.sender_profile_id = None;
+            }
+        }
+    }
+
+    for bindings in state.space_bindings.values_mut() {
+        for binding in bindings.iter_mut() {
+            if binding
+                .sender_profile_id
+                .as_deref()
+                .is_some_and(|sender_profile_id| {
+                    !existing_sender_ids.iter().any(|candidate| candidate == sender_profile_id)
+                })
+            {
+                binding.sender_profile_id = None;
+            }
+        }
+    }
 }
 
 struct SenderProfileBlueprint {
@@ -2555,7 +2954,7 @@ pub fn sender_profile_is_ready(sender_profile_id: &str) -> bool {
 pub fn sender_profile_setup_guidance(sender_profile_id: &str) -> String {
     let blueprint = sender_profile_blueprint(sender_profile_id);
     format!(
-        "This room is still in personal-assist mode. To switch it to shared room mode, configure and verify an independent Matrix bot account for \"{}\" in BotFather Settings -> Senders. This keeps bot output separate from your own account, makes shared-room attribution clear, and gives higher-security rooms an isolated sender boundary.",
+        "This room is still in personal-assist mode. To switch it to shared room mode, configure and verify an independent Matrix bot account for \"{}\" in BotFather Settings -> Senders. This keeps bot output separate from your own account, makes shared-room attribution clear, and gives higher-security rooms an isolated sender boundary. Robrix does not auto-join sender accounts, so invite the bot account first or join it manually in public rooms before binding it here.",
         blueprint.name
     )
 }
