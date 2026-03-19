@@ -4,20 +4,47 @@
 
 use std::{cell::RefCell, collections::HashMap};
 use makepad_widgets::*;
-use matrix_sdk::{RoomState, ruma::{OwnedEventId, OwnedRoomId, RoomId}};
+use matrix_sdk::{
+    RoomState,
+    ruma::{OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UserId},
+};
 use serde::{Deserialize, Serialize};
 use crate::{
-    avatar_cache::clear_avatar_cache, home::{
-        event_source_modal::{EventSourceModalAction, EventSourceModalWidgetRefExt}, invite_modal::{InviteModalAction, InviteModalWidgetRefExt}, main_desktop_ui::MainDesktopUiAction, navigation_tab_bar::{NavigationBarAction, SelectedTab}, new_message_context_menu::NewMessageContextMenuWidgetRefExt, room_context_menu::RoomContextMenuWidgetRefExt, room_screen::{InviteAction, MessageAction, clear_timeline_states}, rooms_list::{RoomsListAction, RoomsListRef, RoomsListUpdate, clear_all_invited_rooms, enqueue_rooms_list_update}
-    }, join_leave_room_modal::{
-        JoinLeaveModalKind, JoinLeaveRoomModalAction, JoinLeaveRoomModalWidgetRefExt
-    }, login::login_screen::LoginAction, logout::logout_confirm_modal::{LogoutAction, LogoutConfirmModalAction, LogoutConfirmModalWidgetRefExt}, persistence, profile::user_profile_cache::clear_user_profile_cache, register::register_screen::RegisterAction, room::BasicRoomDetails, shared::{callout_tooltip::{
-        CalloutTooltipWidgetRefExt,
-        TooltipAction,
-    }, confirmation_modal::{ConfirmationModalContent, ConfirmationModalWidgetRefExt}, image_viewer::{ImageViewerAction, LoadState}, popup_list::{PopupKind, enqueue_popup_notification}}, sliding_sync::{DirectMessageRoomAction, MatrixRequest, current_user_id, submit_async_request}, utils::RoomNameId, verification::VerificationAction, verification_modal::{
-        VerificationModalAction,
-        VerificationModalWidgetRefExt,
-    }
+    avatar_cache::clear_avatar_cache,
+    home::{
+        event_source_modal::{EventSourceModalAction, EventSourceModalWidgetRefExt},
+        invite_modal::{InviteModalAction, InviteModalWidgetRefExt},
+        main_desktop_ui::MainDesktopUiAction,
+        navigation_tab_bar::{NavigationBarAction, SelectedTab},
+        new_message_context_menu::NewMessageContextMenuWidgetRefExt,
+        room_context_menu::RoomContextMenuWidgetRefExt,
+        room_screen::{InviteAction, MessageAction, clear_timeline_states},
+        rooms_list::{
+            RoomsListAction, RoomsListRef, RoomsListUpdate, clear_all_invited_rooms,
+            enqueue_rooms_list_update,
+        },
+    },
+    join_leave_room_modal::{
+        JoinLeaveModalKind, JoinLeaveRoomModalAction, JoinLeaveRoomModalWidgetRefExt,
+    },
+    login::login_screen::LoginAction,
+    logout::logout_confirm_modal::{
+        LogoutAction, LogoutConfirmModalAction, LogoutConfirmModalWidgetRefExt,
+    },
+    persistence,
+    profile::user_profile_cache::clear_user_profile_cache,
+    register::register_screen::RegisterAction,
+    room::BasicRoomDetails,
+    shared::{
+        callout_tooltip::{CalloutTooltipWidgetRefExt, TooltipAction},
+        confirmation_modal::{ConfirmationModalContent, ConfirmationModalWidgetRefExt},
+        image_viewer::{ImageViewerAction, LoadState},
+        popup_list::{PopupKind, enqueue_popup_notification},
+    },
+    sliding_sync::{DirectMessageRoomAction, MatrixRequest, current_user_id, submit_async_request},
+    utils::RoomNameId,
+    verification::VerificationAction,
+    verification_modal::{VerificationModalAction, VerificationModalWidgetRefExt},
 };
 
 live_design! {
@@ -73,7 +100,7 @@ live_design! {
                     }
                     draw_bg: {color: #F3F3F3},
                 }
-            
+
 
                 body = {
                     padding: 0,
@@ -105,7 +132,7 @@ live_design! {
                                 image_viewer_modal_inner = <ImageViewer> {}
                             }
                         }
-                        
+
                         // Context menus should be shown in front of other UI elements,
                         // but behind verification modals.
                         new_message_context_menu = <NewMessageContextMenu> { }
@@ -191,13 +218,16 @@ app_main!(App);
 
 #[derive(Live)]
 pub struct App {
-    #[live] ui: WidgetRef,
+    #[live]
+    ui: WidgetRef,
     /// The top-level app state, shared across various parts of the app.
-    #[rust] app_state: AppState,
+    #[rust]
+    app_state: AppState,
     /// The details of a room we're waiting on to be loaded so that we can navigate to it.
     /// This can be either a room we're waiting to join, or one we're waiting to be invited to.
     /// Also includes an optional room ID to be closed once the awaited room has been loaded.
-    #[rust] waiting_to_navigate_to_room: Option<(BasicRoomDetails, Option<OwnedRoomId>)>,
+    #[rust]
+    waiting_to_navigate_to_room: Option<(BasicRoomDetails, Option<OwnedRoomId>)>,
 }
 
 impl LiveRegister for App {
@@ -217,11 +247,13 @@ impl LiveRegister for App {
         // and link it to the real `tsp_enabled` DSL namespace, which contains real TSP widgets.
         // If the `tsp` feature is not enabled, link the "tsp_link" DSL namespace
         // to the `tsp_disabled` DSL namespace instead, which defines dummy placeholder widgets.
-        #[cfg(feature = "tsp")] {
+        #[cfg(feature = "tsp")]
+        {
             crate::tsp::live_design(cx);
             cx.link(id!(tsp_link), id!(tsp_enabled));
         }
-        #[cfg(not(feature = "tsp"))] {
+        #[cfg(not(feature = "tsp"))]
+        {
             crate::tsp_dummy::live_design(cx);
             cx.link(id!(tsp_link), id!(tsp_disabled));
         }
@@ -256,15 +288,27 @@ impl MatchEvent for App {
         let _ = tracing_subscriber::fmt::try_init();
 
         // Override Makepad's new default-JSON logger. We just want regular formatting.
-        fn regular_log(file_name: &str, line_start: u32, column_start: u32, _line_end: u32, _column_end: u32, message: String, level: LogLevel) {
+        fn regular_log(
+            file_name: &str,
+            line_start: u32,
+            column_start: u32,
+            _line_end: u32,
+            _column_end: u32,
+            message: String,
+            level: LogLevel,
+        ) {
             let l = match level {
-                LogLevel::Panic   => "[!]",
-                LogLevel::Error   => "[E]",
+                LogLevel::Panic => "[!]",
+                LogLevel::Error => "[E]",
                 LogLevel::Warning => "[W]",
-                LogLevel::Log     => "[I]",
-                LogLevel::Wait    => "[.]",
+                LogLevel::Log => "[I]",
+                LogLevel::Wait => "[.]",
             };
-            println!("{l} {file_name}:{}:{}: {message}", line_start + 1, column_start + 1);
+            println!(
+                "{l} {file_name}:{}:{}: {message}",
+                line_start + 1,
+                column_start + 1
+            );
         }
         *LOG_WITH_LEVEL.write().unwrap() = regular_log;
 
@@ -282,24 +326,31 @@ impl MatchEvent for App {
         log!("App::Startup: starting matrix sdk loop");
         let _tokio_rt_handle = crate::sliding_sync::start_matrix_tokio().unwrap();
 
-        #[cfg(feature = "tsp")] {
+        #[cfg(feature = "tsp")]
+        {
             log!("App::Startup: initializing TSP (Trust Spanning Protocol) module.");
             crate::tsp::tsp_init(_tokio_rt_handle).unwrap();
         }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        let invite_confirmation_modal_inner = self.ui.confirmation_modal(ids!(invite_confirmation_modal_inner));
+        let invite_confirmation_modal_inner = self
+            .ui
+            .confirmation_modal(ids!(invite_confirmation_modal_inner));
         if let Some(_accepted) = invite_confirmation_modal_inner.closed(actions) {
             self.ui.modal(ids!(invite_confirmation_modal)).close(cx);
         }
 
-        let delete_confirmation_modal_inner = self.ui.confirmation_modal(ids!(delete_confirmation_modal_inner));
+        let delete_confirmation_modal_inner = self
+            .ui
+            .confirmation_modal(ids!(delete_confirmation_modal_inner));
         if let Some(_accepted) = delete_confirmation_modal_inner.closed(actions) {
             self.ui.modal(ids!(delete_confirmation_modal)).close(cx);
         }
 
-        let positive_confirmation_modal_inner = self.ui.confirmation_modal(ids!(positive_confirmation_modal_inner));
+        let positive_confirmation_modal_inner = self
+            .ui
+            .confirmation_modal(ids!(positive_confirmation_modal_inner));
         if let Some(_accepted) = positive_confirmation_modal_inner.closed(actions) {
             self.ui.modal(ids!(positive_confirmation_modal)).close(cx);
         }
@@ -307,16 +358,18 @@ impl MatchEvent for App {
         for action in actions {
             match action.downcast_ref() {
                 Some(LogoutConfirmModalAction::Open) => {
-                    self.ui.logout_confirm_modal(ids!(logout_confirm_modal_inner)).reset_state(cx);
+                    self.ui
+                        .logout_confirm_modal(ids!(logout_confirm_modal_inner))
+                        .reset_state(cx);
                     self.ui.modal(ids!(logout_confirm_modal)).open(cx);
                     continue;
-                },
+                }
                 Some(LogoutConfirmModalAction::Close { was_internal, .. }) => {
                     if *was_internal {
                         self.ui.modal(ids!(logout_confirm_modal)).close(cx);
                     }
                     continue;
-                },
+                }
                 _ => {}
             }
 
@@ -328,8 +381,8 @@ impl MatchEvent for App {
                     self.ui.redraw(cx);
                     continue;
                 }
-                Some(LogoutAction::ClearAppState { on_clear_appstate }) =>  {
-                    // Clear user profile cache, invited_rooms timeline states 
+                Some(LogoutAction::ClearAppState { on_clear_appstate }) => {
+                    // Clear user profile cache, invited_rooms timeline states
                     clear_all_app_state(cx);
                     // Reset all app state to its default.
                     self.app_state = Default::default();
@@ -396,23 +449,32 @@ impl MatchEvent for App {
             }
 
             // Handle an action requesting to open the new message context menu.
-            if let MessageAction::OpenMessageContextMenu { details, abs_pos } = action.as_widget_action().cast() {
+            if let MessageAction::OpenMessageContextMenu { details, abs_pos } =
+                action.as_widget_action().cast()
+            {
                 self.ui.callout_tooltip(ids!(app_tooltip)).hide(cx);
-                let new_message_context_menu = self.ui.new_message_context_menu(ids!(new_message_context_menu));
+                let new_message_context_menu = self
+                    .ui
+                    .new_message_context_menu(ids!(new_message_context_menu));
                 let expected_dimensions = new_message_context_menu.show(cx, details);
                 // Ensure the context menu does not spill over the window's bounds.
                 let rect = self.ui.window(ids!(main_window)).area().rect(cx);
                 let pos_x = min(abs_pos.x, rect.size.x - expected_dimensions.x);
                 let pos_y = min(abs_pos.y, rect.size.y - expected_dimensions.y);
-                new_message_context_menu.apply_over(cx, live! {
-                    main_content = { margin: { left: (pos_x), top: (pos_y) } }
-                });
+                new_message_context_menu.apply_over(
+                    cx,
+                    live! {
+                        main_content = { margin: { left: (pos_x), top: (pos_y) } }
+                    },
+                );
                 self.ui.redraw(cx);
                 continue;
             }
 
             // Handle an action requesting to open the room context menu.
-            if let RoomsListAction::OpenRoomContextMenu { details, pos } = action.as_widget_action().cast() {
+            if let RoomsListAction::OpenRoomContextMenu { details, pos } =
+                action.as_widget_action().cast()
+            {
                 self.ui.callout_tooltip(ids!(app_tooltip)).hide(cx);
                 let room_context_menu = self.ui.room_context_menu(ids!(room_context_menu));
                 let expected_dimensions = room_context_menu.show(cx, details);
@@ -420,9 +482,12 @@ impl MatchEvent for App {
                 let rect = self.ui.window(ids!(main_window)).area().rect(cx);
                 let pos_x = min(pos.x, rect.size.x - expected_dimensions.x);
                 let pos_y = min(pos.y, rect.size.y - expected_dimensions.y);
-                room_context_menu.apply_over(cx, live! {
-                    main_content = { margin: { left: (pos_x), top: (pos_y) } }
-                });
+                room_context_menu.apply_over(
+                    cx,
+                    live! {
+                        main_content = { margin: { left: (pos_x), top: (pos_y) } }
+                    },
+                );
                 self.ui.redraw(cx);
                 continue;
             }
@@ -440,7 +505,7 @@ impl MatchEvent for App {
                 cx.widget_action(
                     self.ui.widget_uid(),
                     &HeapLiveIdPath::default(),
-                    StackNavigationAction::Push(id!(main_content_view))
+                    StackNavigationAction::Push(id!(main_content_view)),
                 );
                 self.ui.redraw(cx);
                 continue;
@@ -475,18 +540,71 @@ impl MatchEvent for App {
                     cx.action(MainDesktopUiAction::LoadDockFromAppState);
                     continue;
                 }
-                Some(AppStateAction::NavigateToRoom { room_to_close, destination_room }) => {
+                Some(AppStateAction::BotRoomBindingUpdated {
+                    room_id,
+                    bound,
+                    bot_user_id,
+                    warning,
+                }) => {
+                    self.app_state
+                        .bot_settings
+                        .set_room_bound(room_id.clone(), *bound);
+                    let kind = if warning.is_some() {
+                        PopupKind::Warning
+                    } else {
+                        PopupKind::Success
+                    };
+                    let message = match (*bound, bot_user_id.as_ref(), warning.as_deref()) {
+                        (true, Some(bot_user_id), Some(warning)) => {
+                            format!("BotFather {bot_user_id} is available for room {room_id}, but inviting it reported a warning: {warning}")
+                        }
+                        (true, Some(bot_user_id), None) => {
+                            format!("Bound room {room_id} to BotFather {bot_user_id}.")
+                        }
+                        (false, Some(bot_user_id), Some(warning)) => {
+                            format!("Unbound BotFather {bot_user_id} from room {room_id}, with warning: {warning}")
+                        }
+                        (false, Some(bot_user_id), None) => {
+                            format!("Unbound BotFather {bot_user_id} from room {room_id}.")
+                        }
+                        (false, None, Some(warning)) => {
+                            format!(
+                                "Unbound room {room_id} from BotFather, with warning: {warning}"
+                            )
+                        }
+                        (false, None, None) => {
+                            format!("Unbound room {room_id} from BotFather.")
+                        }
+                        (true, None, Some(warning)) => {
+                            format!("BotFather is available for room {room_id}, with warning: {warning}")
+                        }
+                        (true, None, None) => {
+                            format!("Bound room {room_id} to BotFather.")
+                        }
+                    };
+                    enqueue_popup_notification(message, kind, Some(5.0));
+                    self.ui.redraw(cx);
+                    continue;
+                }
+                Some(AppStateAction::NavigateToRoom {
+                    room_to_close,
+                    destination_room,
+                }) => {
                     self.navigate_to_room(cx, room_to_close.as_ref(), destination_room);
                     continue;
                 }
                 // If we successfully loaded a room that we were waiting on,
                 // we can now navigate to it and optionally close a previous room.
-                Some(AppStateAction::RoomLoadedSuccessfully { room_name_id, .. }) if
-                    self.waiting_to_navigate_to_room.as_ref()
+                Some(AppStateAction::RoomLoadedSuccessfully { room_name_id, .. })
+                    if self
+                        .waiting_to_navigate_to_room
+                        .as_ref()
                         .is_some_and(|(dr, _)| dr.room_id() == room_name_id.room_id()) =>
                 {
                     log!("Loaded awaited room {room_name_id:?}, navigating to it now...");
-                    if let Some((dest_room, room_to_close)) = self.waiting_to_navigate_to_room.take() {
+                    if let Some((dest_room, room_to_close)) =
+                        self.waiting_to_navigate_to_room.take()
+                    {
                         self.navigate_to_room(cx, room_to_close.as_ref(), &dest_room);
                     }
                     continue;
@@ -496,18 +614,22 @@ impl MatchEvent for App {
 
             // Handle actions for showing or hiding the tooltip.
             match action.as_widget_action().cast() {
-                TooltipAction::HoverIn { text, widget_rect, options } => {
+                TooltipAction::HoverIn {
+                    text,
+                    widget_rect,
+                    options,
+                } => {
                     // Don't show any tooltips if the message context menu is currently shown.
-                    if self.ui.new_message_context_menu(ids!(new_message_context_menu)).is_currently_shown(cx) {
+                    if self
+                        .ui
+                        .new_message_context_menu(ids!(new_message_context_menu))
+                        .is_currently_shown(cx)
+                    {
                         self.ui.callout_tooltip(ids!(app_tooltip)).hide(cx);
-                    }
-                    else {
-                        self.ui.callout_tooltip(ids!(app_tooltip)).show_with_options(
-                            cx,
-                            &text,
-                            widget_rect,
-                            options,
-                        );
+                    } else {
+                        self.ui
+                            .callout_tooltip(ids!(app_tooltip))
+                            .show_with_options(cx, &text, widget_rect, options);
                     }
                     continue;
                 }
@@ -541,7 +663,8 @@ impl MatchEvent for App {
             //
             // Note: other verification actions are handled by the verification modal itself.
             if let Some(VerificationAction::RequestReceived(state)) = action.downcast_ref() {
-                self.ui.verification_modal(ids!(verification_modal_inner))
+                self.ui
+                    .verification_modal(ids!(verification_modal_inner))
                     .initialize_with_data(cx, state.clone());
                 self.ui.modal(ids!(verification_modal)).open(cx);
                 continue;
@@ -562,12 +685,23 @@ impl MatchEvent for App {
                 _ => {}
             }
             // Handle actions to open/close the TSP verification modal.
-            #[cfg(feature = "tsp")] {
+            #[cfg(feature = "tsp")]
+            {
                 use std::ops::Deref;
-                use crate::tsp::{tsp_verification_modal::{TspVerificationModalAction, TspVerificationModalWidgetRefExt}, TspIdentityAction};
+                use crate::tsp::{
+                    tsp_verification_modal::{
+                        TspVerificationModalAction, TspVerificationModalWidgetRefExt,
+                    },
+                    TspIdentityAction,
+                };
 
-                if let Some(TspIdentityAction::ReceivedDidAssociationRequest { details, wallet_db }) = action.downcast_ref() {
-                    self.ui.tsp_verification_modal(ids!(tsp_verification_modal_inner))
+                if let Some(TspIdentityAction::ReceivedDidAssociationRequest {
+                    details,
+                    wallet_db,
+                }) = action.downcast_ref()
+                {
+                    self.ui
+                        .tsp_verification_modal(ids!(tsp_verification_modal_inner))
                         .initialize_with_details(cx, details.clone(), wallet_db.deref().clone());
                     self.ui.modal(ids!(tsp_verification_modal)).open(cx);
                     continue;
@@ -579,7 +713,9 @@ impl MatchEvent for App {
             }
 
             // Handle a request to show the invite confirmation modal.
-            if let Some(InviteAction::ShowInviteConfirmationModal(content_opt)) = action.downcast_ref() {
+            if let Some(InviteAction::ShowInviteConfirmationModal(content_opt)) =
+                action.downcast_ref()
+            {
                 if let Some(content) = content_opt.borrow_mut().take() {
                     invite_confirmation_modal_inner.show(cx, content);
                     self.ui.modal(ids!(invite_confirmation_modal)).open(cx);
@@ -588,7 +724,8 @@ impl MatchEvent for App {
             }
 
             // Handle a request to show the generic positive confirmation modal.
-            if let Some(PositiveConfirmationModalAction::Show(content_opt)) = action.downcast_ref() {
+            if let Some(PositiveConfirmationModalAction::Show(content_opt)) = action.downcast_ref()
+            {
                 if let Some(content) = content_opt.borrow_mut().take() {
                     positive_confirmation_modal_inner.show(cx, content);
                     self.ui.modal(ids!(positive_confirmation_modal)).open(cx);
@@ -599,7 +736,9 @@ impl MatchEvent for App {
             // Handle a request to show the delete confirmation modal.
             if let Some(ConfirmDeleteAction::Show(content_opt)) = action.downcast_ref() {
                 if let Some(content) = content_opt.borrow_mut().take() {
-                    self.ui.confirmation_modal(ids!(delete_confirmation_modal_inner)).show(cx, content);
+                    self.ui
+                        .confirmation_modal(ids!(delete_confirmation_modal_inner))
+                        .show(cx, content);
                     self.ui.modal(ids!(delete_confirmation_modal)).open(cx);
                 }
                 continue;
@@ -608,8 +747,10 @@ impl MatchEvent for App {
             // Handle InviteModalAction to open/close the invite modal.
             match action.downcast_ref() {
                 Some(InviteModalAction::Open(room_name_id)) => {
-                    self.ui.invite_modal(ids!(invite_modal_inner)).show(cx, room_name_id.clone());
-                    self.ui.modal(ids!(invite_modal)).open(cx); 
+                    self.ui
+                        .invite_modal(ids!(invite_modal_inner))
+                        .show(cx, room_name_id.clone());
+                    self.ui.modal(ids!(invite_modal)).open(cx);
                     continue;
                 }
                 Some(InviteModalAction::Close) => {
@@ -621,8 +762,13 @@ impl MatchEvent for App {
 
             // Handle EventSourceModalAction to open/close the event source modal.
             match action.downcast_ref() {
-                Some(EventSourceModalAction::Open { room_id, event_id, original_json }) => {
-                    self.ui.event_source_modal(ids!(event_source_modal_inner))
+                Some(EventSourceModalAction::Open {
+                    room_id,
+                    event_id,
+                    original_json,
+                }) => {
+                    self.ui
+                        .event_source_modal(ids!(event_source_modal_inner))
                         .show(cx, room_id.clone(), event_id.clone(), original_json.clone());
                     self.ui.modal(ids!(event_source_modal)).open(cx);
                     continue;
@@ -637,7 +783,11 @@ impl MatchEvent for App {
             // Handle DirectMessageRoomActions
             match action.downcast_ref() {
                 Some(DirectMessageRoomAction::FoundExisting { room_name_id, .. }) => {
-                    self.navigate_to_room(cx, None, &BasicRoomDetails::RoomId(room_name_id.clone()));
+                    self.navigate_to_room(
+                        cx,
+                        None,
+                        &BasicRoomDetails::RoomId(room_name_id.clone()),
+                    );
                 }
                 Some(DirectMessageRoomAction::DidNotExist { user_profile }) => {
                     let user_profile = user_profile.clone();
@@ -645,8 +795,7 @@ impl MatchEvent for App {
                         Some(un) if !un.is_empty() => format!(
                             "You don't have an existing direct message room with {} ({}).\n\n\
                             Would you like to create one now?",
-                            un,
-                            user_profile.user_id,
+                            un, user_profile.user_id,
                         ),
                         _ => format!(
                             "You don't have an existing direct message room with {}.\n\n\
@@ -676,15 +825,25 @@ impl MatchEvent for App {
                     );
                     self.ui.modal(ids!(positive_confirmation_modal)).open(cx);
                 }
-                Some(DirectMessageRoomAction::FailedToCreate { user_profile, error }) => {
+                Some(DirectMessageRoomAction::FailedToCreate {
+                    user_profile,
+                    error,
+                }) => {
                     enqueue_popup_notification(
-                        format!("Failed to create a new DM room with {}.\n\nError: {error}", user_profile.displayable_name()),
+                        format!(
+                            "Failed to create a new DM room with {}.\n\nError: {error}",
+                            user_profile.displayable_name()
+                        ),
                         PopupKind::Error,
                         None,
                     );
                 }
                 Some(DirectMessageRoomAction::NewlyCreated { room_name_id, .. }) => {
-                    self.navigate_to_room(cx, None, &BasicRoomDetails::RoomId(room_name_id.clone()));
+                    self.navigate_to_room(
+                        cx,
+                        None,
+                        &BasicRoomDetails::RoomId(room_name_id.clone()),
+                    );
                 }
                 _ => {}
             }
@@ -693,7 +852,7 @@ impl MatchEvent for App {
 }
 
 /// Clears all thread-local UI caches (user profiles, invited rooms, and timeline states).
-/// The `cx` parameter ensures that these thread-local caches are cleared on the main UI thread, 
+/// The `cx` parameter ensures that these thread-local caches are cleared on the main UI thread,
 fn clear_all_app_state(cx: &mut Cx) {
     clear_user_profile_cache(cx);
     clear_all_invited_rooms(cx);
@@ -714,27 +873,34 @@ impl AppMain for App {
                     error!("Failed to save app state. Error: {e}");
                 }
             }
-            #[cfg(feature = "tsp")] {
+            #[cfg(feature = "tsp")]
+            {
                 // Save the TSP wallet state, if it exists, with a 3-second timeout.
                 let tsp_state = std::mem::take(&mut *crate::tsp::tsp_state_ref().lock().unwrap());
                 let res = crate::sliding_sync::block_on_async_with_timeout(
                     Some(std::time::Duration::from_secs(3)),
                     async move {
                         match tsp_state.close_and_serialize().await {
-                            Ok(saved_state) => match persistence::save_tsp_state_async(saved_state).await {
-                                Ok(_) => { }
-                                Err(e) => error!("Failed to save TSP wallet state. Error: {e}"),
+                            Ok(saved_state) => {
+                                match persistence::save_tsp_state_async(saved_state).await {
+                                    Ok(_) => {}
+                                    Err(e) => error!("Failed to save TSP wallet state. Error: {e}"),
+                                }
                             }
-                            Err(e) => error!("Failed to close and serialize TSP wallet state. Error: {e}"),
+                            Err(e) => {
+                                error!("Failed to close and serialize TSP wallet state. Error: {e}")
+                            }
                         }
                     },
                 );
                 if let Err(_e) = res {
-                    error!("Failed to save TSP wallet state before app shutdown. Error: Timed Out.");
+                    error!(
+                        "Failed to save TSP wallet state before app shutdown. Error: Timed Out."
+                    );
                 }
             }
         }
-        
+
         // Forward events to the MatchEvent trait implementation.
         self.match_event(cx, event);
         let scope = &mut Scope::with_data(&mut self.app_state);
@@ -782,9 +948,15 @@ impl App {
                 .modal(ids!(login_screen_view.login_screen.login_status_modal))
                 .close(cx);
         }
-        self.ui.view(ids!(login_screen_view)).set_visible(cx, show_login);
-        self.ui.view(ids!(register_screen_view)).set_visible(cx, false);
-        self.ui.view(ids!(home_screen_view)).set_visible(cx, !show_login);
+        self.ui
+            .view(ids!(login_screen_view))
+            .set_visible(cx, show_login);
+        self.ui
+            .view(ids!(register_screen_view))
+            .set_visible(cx, false);
+        self.ui
+            .view(ids!(home_screen_view))
+            .set_visible(cx, !show_login);
     }
 
     /// Navigates to the given `destination_room`, optionally closing the `room_to_close`.
@@ -804,12 +976,17 @@ impl App {
                     &HeapLiveIdPath::default(),
                     DockAction::TabCloseWasPressed(tab_id),
                 );
-                enqueue_rooms_list_update(RoomsListUpdate::HideRoom { room_id: to_close.clone() });
+                enqueue_rooms_list_update(RoomsListUpdate::HideRoom {
+                    room_id: to_close.clone(),
+                });
             }
         });
 
         let destination_room_id = destination_room.room_id();
-        let new_selected_room = match cx.get_global::<RoomsListRef>().get_room_state(destination_room_id) {
+        let new_selected_room = match cx
+            .get_global::<RoomsListRef>()
+            .get_room_state(destination_room_id)
+        {
             Some(RoomState::Joined) => SelectedRoom::JoinedRoom {
                 room_name_id: destination_room.room_name_id().clone(),
             },
@@ -818,11 +995,12 @@ impl App {
             },
             // If the destination room is not yet loaded, show a join modal.
             _ => {
-                log!("Destination room {:?} not loaded, showing join modal...", destination_room.room_name_id());
-                self.waiting_to_navigate_to_room = Some((
-                    destination_room.clone(),
-                    room_to_close.cloned(),
-                ));
+                log!(
+                    "Destination room {:?} not loaded, showing join modal...",
+                    destination_room.room_name_id()
+                );
+                self.waiting_to_navigate_to_room =
+                    Some((destination_room.clone(), room_to_close.cloned()));
                 cx.action(JoinLeaveRoomModalAction::Open {
                     kind: JoinLeaveModalKind::JoinRoom {
                         details: destination_room.clone(),
@@ -834,8 +1012,8 @@ impl App {
             }
         };
 
-
-        log!("Navigating to destination room {:?}, closing room {:?}",
+        log!(
+            "Navigating to destination room {:?}, closing room {:?}",
             destination_room.room_name_id(),
             room_to_close,
         );
@@ -883,6 +1061,91 @@ pub struct AppState {
     pub saved_dock_state_per_space: HashMap<OwnedRoomId, SavedDockState>,
     /// Whether a user is currently logged in to Robrix or not.
     pub logged_in: bool,
+    /// Local configuration and UI state for bot-assisted room binding.
+    #[serde(default)]
+    pub bot_settings: BotSettingsState,
+}
+
+/// Local bot integration settings persisted per Matrix account.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BotSettingsState {
+    /// Whether bot-assisted room binding is enabled in the UI.
+    pub enabled: bool,
+    /// The configured botfather user, either as a full MXID or localpart.
+    pub botfather_user_id: String,
+    /// Rooms that Robrix currently considers bound to BotFather.
+    pub bound_rooms: Vec<OwnedRoomId>,
+}
+
+impl Default for BotSettingsState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            botfather_user_id: Self::DEFAULT_BOTFATHER_LOCALPART.to_string(),
+            bound_rooms: Vec::new(),
+        }
+    }
+}
+
+impl BotSettingsState {
+    pub const DEFAULT_BOTFATHER_LOCALPART: &'static str = "bot";
+
+    /// Returns `true` if the given room is currently marked as bound locally.
+    pub fn is_room_bound(&self, room_id: &RoomId) -> bool {
+        self.bound_rooms
+            .iter()
+            .any(|bound_room_id| bound_room_id == room_id)
+    }
+
+    /// Updates the local bound/unbound state for the given room.
+    pub fn set_room_bound(&mut self, room_id: OwnedRoomId, bound: bool) {
+        if bound {
+            if !self.is_room_bound(&room_id) {
+                self.bound_rooms.push(room_id);
+                self.bound_rooms
+                    .sort_by(|lhs, rhs| lhs.as_str().cmp(rhs.as_str()));
+            }
+        } else {
+            self.bound_rooms
+                .retain(|existing_room_id| existing_room_id != &room_id);
+        }
+    }
+
+    /// Returns the configured botfather user ID, resolving a localpart against
+    /// the current user's homeserver when needed.
+    pub fn resolved_bot_user_id(
+        &self,
+        current_user_id: Option<&UserId>,
+    ) -> Result<OwnedUserId, String> {
+        let raw = self.botfather_user_id.trim();
+        if raw.starts_with('@') || raw.contains(':') {
+            let full_user_id = if raw.starts_with('@') {
+                raw.to_string()
+            } else {
+                format!("@{raw}")
+            };
+            return UserId::parse(&full_user_id)
+                .map(|user_id| user_id.to_owned())
+                .map_err(|_| format!("Invalid bot user ID: {full_user_id}"));
+        }
+
+        let Some(current_user_id) = current_user_id else {
+            return Err(
+                "Current user ID is unavailable, so the bot homeserver cannot be resolved.".into(),
+            );
+        };
+
+        let localpart = if raw.is_empty() {
+            Self::DEFAULT_BOTFATHER_LOCALPART
+        } else {
+            raw
+        };
+        let full_user_id = format!("@{localpart}:{}", current_user_id.server_name());
+        UserId::parse(&full_user_id)
+            .map(|user_id| user_id.to_owned())
+            .map_err(|_| format!("Invalid bot user ID: {full_user_id}"))
+    }
 }
 
 /// A snapshot of the main dock: all state needed to restore the dock tabs/layout.
@@ -898,7 +1161,6 @@ pub struct SavedDockState {
     /// The selected room tab in this dock when the dock state was saved.
     pub selected_room: Option<SelectedRoom>,
 }
-
 
 /// Represents a room currently or previously selected by the user.
 ///
@@ -956,9 +1218,7 @@ impl SelectedRoom {
         match self {
             SelectedRoom::InvitedRoom { room_name_id } if room_name_id.room_id() == room_id => {
                 let name = room_name_id.clone();
-                *self = SelectedRoom::JoinedRoom {
-                    room_name_id: name,
-                };
+                *self = SelectedRoom::JoinedRoom { room_name_id: name };
                 true
             }
             _ => false,
@@ -968,11 +1228,14 @@ impl SelectedRoom {
     /// Returns the `LiveId` of the room tab corresponding to this `SelectedRoom`.
     pub fn tab_id(&self) -> LiveId {
         match self {
-            SelectedRoom::Thread { room_name_id, thread_root_event_id } => {
-                LiveId::from_str(
-                    &format!("{}##{}", room_name_id.room_id(), thread_root_event_id)
-                )
-            }
+            SelectedRoom::Thread {
+                room_name_id,
+                thread_root_event_id,
+            } => LiveId::from_str(&format!(
+                "{}##{}",
+                room_name_id.room_id(),
+                thread_root_event_id
+            )),
             other => LiveId::from_str(other.room_id().as_str()),
         }
     }
@@ -1026,6 +1289,13 @@ pub enum AppStateAction {
     /// The given app state was loaded from persistent storage
     /// and is ready to be restored.
     RestoreAppStateFromPersistentState(AppState),
+    /// A room-level BotFather bind or unbind action completed.
+    BotRoomBindingUpdated {
+        room_id: OwnedRoomId,
+        bound: bool,
+        bot_user_id: Option<OwnedUserId>,
+        warning: Option<String>,
+    },
     /// The given room was successfully loaded from the homeserver
     /// and is now known to our client.
     ///

@@ -1,7 +1,12 @@
 
 use makepad_widgets::*;
 
-use crate::{home::navigation_tab_bar::{NavigationBarAction, get_own_profile}, profile::user_profile::UserProfile, settings::account_settings::AccountSettingsWidgetExt};
+use crate::{
+    app::BotSettingsState,
+    home::navigation_tab_bar::{NavigationBarAction, get_own_profile},
+    profile::user_profile::UserProfile,
+    settings::{account_settings::AccountSettingsWidgetExt, bot_settings::BotSettingsWidgetExt},
+};
 
 live_design! {
     use link::theme::*;
@@ -12,6 +17,7 @@ live_design! {
     use crate::shared::styles::*;
     use crate::shared::icon_button::*;
     use crate::settings::account_settings::AccountSettings;
+    use crate::settings::bot_settings::BotSettings;
     use link::tsp_link::TspSettingsScreen;
     use link::tsp_link::CreateWalletModal;
     use link::tsp_link::CreateDidModal;
@@ -72,6 +78,10 @@ live_design! {
 
                 // The account settings section.
                 account_settings = <AccountSettings> {}
+
+                <LineH> { width: 400, padding: 10, margin: {top: 20, bottom: 5} }
+
+                bot_settings = <BotSettings> {}
 
                 <LineH> { width: 400, padding: 10, margin: {top: 20, bottom: 5} }
 
@@ -181,12 +191,13 @@ impl Widget for SettingsScreen {
 
 impl SettingsScreen {
     /// Fetches the current user's profile and uses it to populate the settings screen.
-    pub fn populate(&mut self, cx: &mut Cx, own_profile: Option<UserProfile>) {
+    pub fn populate(&mut self, cx: &mut Cx, own_profile: Option<UserProfile>, bot_settings: &BotSettingsState) {
         let Some(profile) = own_profile.or_else(|| get_own_profile(cx)) else {
             error!("Failed to get own profile for settings screen.");
             return;
         };
         self.view.account_settings(ids!(account_settings)).populate(cx, profile);
+        self.view.bot_settings(ids!(bot_settings)).populate(cx, bot_settings);
         self.view.button(ids!(close_button)).reset_hover(cx);
         cx.set_key_focus(self.view.area());
         self.redraw(cx);
@@ -195,8 +206,8 @@ impl SettingsScreen {
 
 impl SettingsScreenRef {
     /// See [`SettingsScreen::populate()`].
-    pub fn populate(&self, cx: &mut Cx, own_profile: Option<UserProfile>) {
+    pub fn populate(&self, cx: &mut Cx, own_profile: Option<UserProfile>, bot_settings: &BotSettingsState) {
         let Some(mut inner) = self.borrow_mut() else { return; };
-        inner.populate(cx, own_profile);
+        inner.populate(cx, own_profile, bot_settings);
     }
 }

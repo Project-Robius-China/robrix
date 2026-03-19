@@ -13,7 +13,7 @@ use matrix_sdk::{
             receipt::Receipt,
             room::{
                 ImageInfo, MediaSource, message::{
-                    AudioMessageEventContent, EmoteMessageEventContent, FileMessageEventContent, FormattedBody, ImageMessageEventContent, KeyVerificationRequestEventContent, LocationMessageEventContent, MessageFormat, MessageType, NoticeMessageEventContent, TextMessageEventContent, VideoMessageEventContent
+                    AudioMessageEventContent, EmoteMessageEventContent, FileMessageEventContent, FormattedBody, ImageMessageEventContent, KeyVerificationRequestEventContent, LocationMessageEventContent, MessageFormat, MessageType, NoticeMessageEventContent, RoomMessageEventContent, TextMessageEventContent, VideoMessageEventContent
                 }
             },
             sticker::{StickerEventContent, StickerMediaSource},
@@ -26,7 +26,7 @@ use matrix_sdk_ui::timeline::{
 use ruma::{OwnedUserId, api::client::receipt::create_receipt::v3::ReceiptType, events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent}, owned_room_id};
 
 use crate::{
-    app::{AppStateAction, ConfirmDeleteAction, SelectedRoom}, avatar_cache, event_preview::{plaintext_body_of_timeline_item, text_preview_of_encrypted_message, text_preview_of_member_profile_change, text_preview_of_other_message_like, text_preview_of_other_state, text_preview_of_room_membership_change, text_preview_of_timeline_item}, home::{edited_indicator::EditedIndicatorWidgetRefExt, link_preview::{LinkPreviewCache, LinkPreviewRef, LinkPreviewWidgetRefExt}, loading_pane::{LoadingPaneState, LoadingPaneWidgetExt}, room_image_viewer::{get_image_name_and_filesize, populate_matrix_image_modal}, rooms_list::{RoomsListAction, RoomsListRef}, tombstone_footer::SuccessorRoomDetails}, media_cache::{MediaCache, MediaCacheEntry}, profile::{
+    app::{AppState, AppStateAction, ConfirmDeleteAction, SelectedRoom}, avatar_cache, event_preview::{plaintext_body_of_timeline_item, text_preview_of_encrypted_message, text_preview_of_member_profile_change, text_preview_of_other_message_like, text_preview_of_other_state, text_preview_of_room_membership_change, text_preview_of_timeline_item}, home::{create_bot_modal::{CreateBotModalAction, CreateBotModalWidgetExt}, delete_bot_modal::{DeleteBotModalAction, DeleteBotModalWidgetExt}, edited_indicator::EditedIndicatorWidgetRefExt, link_preview::{LinkPreviewCache, LinkPreviewRef, LinkPreviewWidgetRefExt}, loading_pane::{LoadingPaneState, LoadingPaneWidgetExt}, room_image_viewer::{get_image_name_and_filesize, populate_matrix_image_modal}, rooms_list::{RoomsListAction, RoomsListRef}, tombstone_footer::SuccessorRoomDetails}, media_cache::{MediaCache, MediaCacheEntry}, profile::{
         user_profile::{ShowUserProfileAction, UserProfile, UserProfileAndRoomId, UserProfilePaneInfo, UserProfileSlidingPaneRef, UserProfileSlidingPaneWidgetExt},
         user_profile_cache,
     },
@@ -34,7 +34,7 @@ use crate::{
     shared::{
         avatar::{AvatarState, AvatarWidgetRefExt}, callout_tooltip::{CalloutTooltipOptions, TooltipAction, TooltipPosition}, confirmation_modal::ConfirmationModalContent, html_or_plaintext::{HtmlOrPlaintextRef, HtmlOrPlaintextWidgetRefExt, RobrixHtmlLinkAction}, image_viewer::{ImageViewerAction, ImageViewerMetaData, LoadState}, jump_to_bottom_button::{JumpToBottomButtonWidgetExt, UnreadMessageCount}, popup_list::{PopupKind, enqueue_popup_notification}, restore_status_view::RestoreStatusViewWidgetExt, styles::*, text_or_image::{TextOrImageAction, TextOrImageRef, TextOrImageWidgetRefExt}, timestamp::TimestampWidgetRefExt
     },
-    sliding_sync::{BackwardsPaginateUntilEventRequest, MatrixRequest, PaginationDirection, TimelineEndpoints, TimelineKind, TimelineRequestSender, UserPowerLevels, get_client, submit_async_request, take_timeline_endpoints}, utils::{self, ImageFormat, MEDIA_THUMBNAIL_FORMAT, RoomNameId, unix_time_millis_to_datetime}
+    sliding_sync::{BackwardsPaginateUntilEventRequest, MatrixRequest, PaginationDirection, TimelineEndpoints, TimelineKind, TimelineRequestSender, UserPowerLevels, current_user_id, get_client, submit_async_request, take_timeline_endpoints}, utils::{self, ImageFormat, MEDIA_THUMBNAIL_FORMAT, RoomNameId, unix_time_millis_to_datetime}
 };
 use crate::home::event_reaction_list::ReactionListWidgetRefExt;
 use crate::home::room_read_receipt::AvatarRowWidgetRefExt;
@@ -62,6 +62,55 @@ const COLOR_THREAD_SUMMARY_BG: Vec4 = vec4(1.0, 0.957, 0.898, 1.0);
 /// #FFEACC
 const COLOR_THREAD_SUMMARY_BG_HOVER: Vec4 = vec4(1.0, 0.918, 0.8, 1.0);
 
+fn escape_slash_command_arg(value: &str) -> String {
+    value.trim().replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn format_create_bot_command(username: &str, display_name: &str, system_prompt: Option<&str>) -> String {
+    let mut command = format!("/createbot {} {}", username.trim(), display_name.trim());
+    if let Some(system_prompt) = system_prompt.map(str::trim).filter(|value| !value.is_empty()) {
+        command.push_str(" --prompt \"");
+        command.push_str(&escape_slash_command_arg(system_prompt));
+        command.push('"');
+    }
+    command
+}
+
+fn format_delete_bot_command(matrix_user_id: &UserId) -> String {
+    format!("/deletebot {matrix_user_id}")
+}
+
+fn resolve_delete_bot_user_id(
+    user_id_or_localpart: &str,
+    current_user_id: Option<&UserId>,
+) -> Result<OwnedUserId, String> {
+    let raw = user_id_or_localpart.trim();
+    if raw.is_empty() {
+        return Err("Please enter the bot Matrix user ID to delete.".into());
+    }
+
+    if raw.starts_with('@') || raw.contains(':') {
+        let full_user_id = if raw.starts_with('@') {
+            raw.to_string()
+        } else {
+            format!("@{raw}")
+        };
+        return UserId::parse(&full_user_id)
+            .map(|user_id| user_id.to_owned())
+            .map_err(|_| format!("Invalid Matrix user ID: {full_user_id}"));
+    }
+
+    let Some(current_user_id) = current_user_id else {
+        return Err(
+            "Current user ID is unavailable, so the bot homeserver cannot be resolved.".into(),
+        );
+    };
+
+    let full_user_id = format!("@{raw}:{}", current_user_id.server_name());
+    UserId::parse(&full_user_id)
+        .map(|user_id| user_id.to_owned())
+        .map_err(|_| format!("Invalid Matrix user ID: {full_user_id}"))
+}
 
 live_design! {
     use link::theme::*;
@@ -79,6 +128,8 @@ live_design! {
     use crate::profile::user_profile::UserProfileSlidingPane;
     use crate::home::edited_indicator::*;
     use crate::home::event_reaction_list::*;
+    use crate::home::create_bot_modal::*;
+    use crate::home::delete_bot_modal::*;
     use crate::home::loading_pane::*;
     use crate::room::room_input_bar::*;
     use crate::room::reply_preview::RepliedToMessage;
@@ -530,6 +581,276 @@ live_design! {
         }
     }
 
+    AppServicePanel = {{AppServicePanel}} {
+        width: Fill,
+        height: Fit,
+        margin: {left: 14, right: 54, top: 10, bottom: 16}
+        flow: Down
+        align: {x: 0.0, y: 0.0}
+
+        message_column = <View> {
+            width: 408,
+            height: Fit,
+            flow: Down
+            spacing: 5
+
+            sender_row = <View> {
+                width: Fit,
+                height: Fit,
+                flow: Right,
+                spacing: 6
+
+                sender_name = <Label> {
+                    width: Fit,
+                    height: Fit,
+                    draw_text: {
+                        text_style: <USERNAME_TEXT_STYLE>{font_size: 10.8}
+                        color: (COLOR_ACTIVE_PRIMARY)
+                    }
+                    text: "BotFather"
+                }
+
+                sender_tag = <Label> {
+                    width: Fit,
+                    height: Fit,
+                    draw_text: {
+                        text_style: <REGULAR_TEXT>{font_size: 9.5}
+                        color: #8A8A8A
+                    }
+                    text: "bot"
+                }
+            }
+
+            bubble = <RoundedView> {
+                width: Fill,
+                height: Fit,
+                flow: Down
+                spacing: 8
+                padding: {top: 14, right: 14, bottom: 12, left: 14}
+
+                show_bg: true
+                draw_bg: {
+                    color: (COLOR_PRIMARY)
+                    border_radius: 0.0
+                    border_size: 1.0
+                    border_color: (COLOR_SECONDARY_DARKER)
+                }
+
+                header = <View> {
+                    width: Fill,
+                    height: Fit,
+                    flow: Right,
+                    align: {x: 0.5, y: 0.5}
+
+                    title = <Label> {
+                        width: Fit,
+                        height: Fit,
+                        draw_text: {
+                            text_style: <USERNAME_TEXT_STYLE>{font_size: 11.2}
+                            color: #1F1F1F
+                        }
+                        text: "App Service Actions"
+                    }
+
+                    <FillerX> {}
+
+                    dismiss_button = <RobrixIconButton> {
+                        width: 28,
+                        height: 24,
+                        align: {x: 0.5, y: 0.5},
+                        spacing: 0,
+                        padding: 0,
+                        draw_icon: {
+                            svg_file: (ICON_CLOSE)
+                            color: #8B8B8B
+                        }
+                        icon_walk: {width: 12, height: 12}
+                        draw_bg: {
+                            color: (COLOR_SECONDARY)
+                            border_radius: 0.0
+                        }
+                        text: ""
+                    }
+                }
+
+                subtitle = <Label> {
+                    width: Fill,
+                    height: Fit,
+                    draw_text: {
+                        text_style: <REGULAR_TEXT>{font_size: 10.5}
+                        color: (COLOR_TEXT)
+                        wrap: Word
+                    }
+                    text: "Create a bot through BotFather. Robrix only sends the matching slash command."
+                }
+
+                footer = <View> {
+                    width: Fill,
+                    height: Fit,
+                    flow: Right,
+                    align: {x: 1.0, y: 0.5}
+
+                    timestamp = <Label> {
+                        width: Fit,
+                        height: Fit,
+                        draw_text: {
+                            text_style: <REGULAR_TEXT>{font_size: 8.8}
+                            color: #9A9A9A
+                        }
+                        text: "now"
+                    }
+                }
+            }
+
+            keyboard = <View> {
+                width: Fill,
+                height: Fit,
+                flow: Down
+                spacing: 8
+
+                first_row = <View> {
+                    width: Fit,
+                    height: Fit,
+                    flow: Right,
+                    spacing: 8
+
+                    create_button = <RobrixIconButton> {
+                        width: 156,
+                        height: 46,
+                        padding: 10,
+                        draw_icon: {
+                            svg_file: (ICON_CHECKMARK),
+                            color: (COLOR_PRIMARY),
+                        }
+                        icon_walk: {width: 16, height: 16, margin: {left: -2, right: -1}}
+                        draw_bg: {
+                            border_size: 0.0
+                            color: (COLOR_ACTIVE_PRIMARY)
+                            color_hover: (COLOR_ACTIVE_PRIMARY_DARKER)
+                            color_down: (COLOR_ACTIVE_PRIMARY_DARKER)
+                            border_radius: 0.0
+                        }
+                        draw_text: {
+                            color: (COLOR_PRIMARY),
+                            text_style: <USERNAME_TEXT_STYLE>{font_size: 11.5}
+                        }
+                        text: "Create Bot"
+                    }
+
+                    list_button = <RobrixIconButton> {
+                        width: 156,
+                        height: 46,
+                        padding: 10,
+                        draw_icon: {
+                            svg_file: (ICON_SEARCH),
+                            color: (COLOR_TEXT),
+                        }
+                        icon_walk: {width: 14, height: 14, margin: {left: -2, right: -1}}
+                        draw_bg: {
+                            border_size: 1.0
+                            border_color: (COLOR_SECONDARY_DARKER)
+                            color: (COLOR_SECONDARY)
+                            color_hover: (COLOR_SECONDARY_DARKER)
+                            color_down: (COLOR_SECONDARY_DARKER)
+                            border_radius: 0.0
+                        }
+                        draw_text: {
+                            color: (COLOR_TEXT),
+                            text_style: <USERNAME_TEXT_STYLE>{font_size: 11.5}
+                        }
+                        text: "List Bots"
+                    }
+                }
+
+                second_row = <View> {
+                    width: Fit,
+                    height: Fit,
+                    flow: Right,
+                    spacing: 8
+
+                    delete_button = <RobrixIconButton> {
+                        width: 156,
+                        height: 46,
+                        padding: 10,
+                        draw_icon: {
+                            svg_file: (ICON_CLOSE),
+                            color: (COLOR_FG_DANGER_RED),
+                        }
+                        icon_walk: {width: 14, height: 14, margin: {left: -2, right: -1}}
+                        draw_bg: {
+                            border_size: 0.75
+                            border_color: (COLOR_FG_DANGER_RED)
+                            color: (COLOR_BG_DANGER_RED)
+                            color_hover: (COLOR_BG_DANGER_RED)
+                            color_down: (COLOR_BG_DANGER_RED)
+                            border_radius: 0.0
+                        }
+                        draw_text: {
+                            color: (COLOR_FG_DANGER_RED),
+                            text_style: <USERNAME_TEXT_STYLE>{font_size: 11.5}
+                        }
+                        text: "Delete Bot"
+                    }
+
+                    help_button = <RobrixIconButton> {
+                        width: 156,
+                        height: 46,
+                        padding: 10,
+                        draw_icon: {
+                            svg_file: (ICON_INFO),
+                            color: (COLOR_TEXT),
+                        }
+                        icon_walk: {width: 14, height: 14, margin: {left: -2, right: -1}}
+                        draw_bg: {
+                            border_size: 1.0
+                            border_color: (COLOR_SECONDARY_DARKER)
+                            color: (COLOR_SECONDARY)
+                            color_hover: (COLOR_SECONDARY_DARKER)
+                            color_down: (COLOR_SECONDARY_DARKER)
+                            border_radius: 0.0
+                        }
+                        draw_text: {
+                            color: (COLOR_TEXT),
+                            text_style: <USERNAME_TEXT_STYLE>{font_size: 11.5}
+                        }
+                        text: "Bot Help"
+                    }
+                }
+
+                third_row = <View> {
+                    width: Fit,
+                    height: Fit,
+                    flow: Right,
+                    spacing: 8
+
+                    unbind_button = <RobrixIconButton> {
+                        width: 156,
+                        height: 46,
+                        padding: 10,
+                        draw_icon: {
+                            svg_file: (ICON_CLOSE),
+                            color: (COLOR_TEXT),
+                        }
+                        icon_walk: {width: 14, height: 14, margin: {left: -2, right: -1}}
+                        draw_bg: {
+                            border_size: 1.0
+                            border_color: (COLOR_SECONDARY_DARKER)
+                            color: (COLOR_SECONDARY)
+                            color_hover: (COLOR_SECONDARY_DARKER)
+                            color_down: (COLOR_SECONDARY_DARKER)
+                            border_radius: 0.0
+                        }
+                        draw_text: {
+                            color: (COLOR_TEXT),
+                            text_style: <USERNAME_TEXT_STYLE>{font_size: 11.5}
+                        }
+                        text: "Unbind"
+                    }
+                }
+            }
+        }
+    }
+
     Timeline = <View> {
         width: Fill,
         height: Fill,
@@ -553,6 +874,7 @@ live_design! {
             Empty = <Empty> {}
             DateDivider = <DateDivider> {}
             ReadMarker = <ReadMarker> {}
+            AppServicePanel = <AppServicePanel> {}
         }
 
         // A jump to bottom button (with an unread message badge) that is shown
@@ -609,6 +931,18 @@ live_design! {
             // to finish loading, e.g., when loading an older replied-to message.
             loading_pane = <LoadingPane> { }
 
+            create_bot_modal = <Modal> {
+                content: {
+                    create_bot_modal_inner = <CreateBotModal> {}
+                }
+            }
+
+            delete_bot_modal = <Modal> {
+                content: {
+                    delete_bot_modal_inner = <DeleteBotModal> {}
+                }
+            }
+
 
             /*
              * TODO: add the action bar back in as a series of floating buttons.
@@ -649,6 +983,8 @@ pub struct RoomScreen {
     #[rust] is_loaded: bool,
     /// Whether or not all rooms have been loaded (received from the homeserver).
     #[rust] all_rooms_loaded: bool,
+    /// Whether the in-room app service quick actions card is currently visible.
+    #[rust] show_app_service_actions: bool,
 }
 impl Drop for RoomScreen {
     fn drop(&mut self) {
@@ -941,6 +1277,14 @@ impl Widget for RoomScreen {
             let room_props = if let Some(tl) = self.tl_state.as_ref() {
                 let room_id = tl.kind.room_id().clone();
                 let room_members = tl.room_members.clone();
+                let (app_service_enabled, app_service_room_bound) = scope
+                    .data
+                    .get::<AppState>()
+                    .map(|app_state| (
+                        app_state.bot_settings.enabled,
+                        app_state.bot_settings.is_room_bound(&room_id),
+                    ))
+                    .unwrap_or((false, false));
 
                 // Fetch room data once to avoid duplicate expensive lookups
                 let (room_display_name, room_avatar_url) = get_client()
@@ -957,6 +1301,8 @@ impl Widget for RoomScreen {
                     timeline_kind: tl.kind.clone(),
                     room_members,
                     room_avatar_url,
+                    app_service_enabled,
+                    app_service_room_bound,
                 }
             } else if let Some(room_name) = &self.room_name_id {
                 // Fallback case: we have a room_name but no tl_state yet
@@ -967,6 +1313,8 @@ impl Widget for RoomScreen {
                         .expect("BUG: room_name_id was set but timeline_kind was missing"),
                     room_members: None,
                     room_avatar_url: None,
+                    app_service_enabled: false,
+                    app_service_room_bound: false,
                 }
             } else {
                 // No room selected yet, skip event handling that requires room context
@@ -982,6 +1330,8 @@ impl Widget for RoomScreen {
                     timeline_kind: TimelineKind::MainRoom { room_id },
                     room_members: None,
                     room_avatar_url: None,
+                    app_service_enabled: false,
+                    app_service_room_bound: false,
                 }
             };
             let mut room_scope = Scope::with_props(&room_props);
@@ -993,11 +1343,228 @@ impl Widget for RoomScreen {
             let mut actions_generated_within_this_room_screen = cx.capture_actions(|cx|
                 self.view.handle_event(cx, event, &mut room_scope)
             );
+
             // Here, we handle and remove any general actions that are relevant to only this RoomScreen.
             // Removing the handled actions ensures they are not mistakenly handled by other RoomScreen widget instances.
             actions_generated_within_this_room_screen.retain(|action| {
                 if self.handle_link_clicked(cx, action, &user_profile_sliding_pane) {
                     return false;
+                }
+
+                match action
+                    .as_widget_action()
+                    .widget_uid_eq(room_screen_widget_uid)
+                    .cast()
+                {
+                    AppServicePanelAction::Dismiss => {
+                        self.set_app_service_actions_visible(cx, false);
+                        return false;
+                    }
+                    AppServicePanelAction::OpenCreateBotModal => {
+                        if let Some(app_state) = scope.data.get::<AppState>() {
+                            if !app_state.bot_settings.enabled {
+                                enqueue_popup_notification(
+                                    "Enable App Service before creating bots in a room.",
+                                    PopupKind::Warning,
+                                    Some(4.0),
+                                );
+                                self.set_app_service_actions_visible(cx, false);
+                            } else if !room_props.app_service_room_bound {
+                                enqueue_popup_notification(
+                                    "Bind BotFather to this room before creating a bot.",
+                                    PopupKind::Warning,
+                                    Some(4.0),
+                                );
+                                self.set_app_service_actions_visible(cx, false);
+                            } else {
+                                self.open_create_bot_modal(cx);
+                            }
+                        } else {
+                            enqueue_popup_notification(
+                                "App state is unavailable, so bot creation is temporarily unavailable.",
+                                PopupKind::Error,
+                                Some(4.0),
+                            );
+                            self.set_app_service_actions_visible(cx, false);
+                        }
+                        return false;
+                    }
+                    AppServicePanelAction::OpenDeleteBotModal => {
+                        if let Some(app_state) = scope.data.get::<AppState>() {
+                            if !app_state.bot_settings.enabled {
+                                enqueue_popup_notification(
+                                    "Enable App Service before deleting bots in a room.",
+                                    PopupKind::Warning,
+                                    Some(4.0),
+                                );
+                                self.set_app_service_actions_visible(cx, false);
+                            } else if !room_props.app_service_room_bound {
+                                enqueue_popup_notification(
+                                    "Bind BotFather to this room before deleting a bot.",
+                                    PopupKind::Warning,
+                                    Some(4.0),
+                                );
+                                self.set_app_service_actions_visible(cx, false);
+                            } else {
+                                self.open_delete_bot_modal(cx);
+                            }
+                        } else {
+                            enqueue_popup_notification(
+                                "App state is unavailable, so bot deletion is temporarily unavailable.",
+                                PopupKind::Error,
+                                Some(4.0),
+                            );
+                            self.set_app_service_actions_visible(cx, false);
+                        }
+                        return false;
+                    }
+                    AppServicePanelAction::SendListBots => {
+                        if let Some(app_state) = scope.data.get::<AppState>() {
+                            self.send_botfather_command(
+                                cx,
+                                app_state,
+                                "/listbots",
+                                "Sent `/listbots` to BotFather.",
+                            );
+                        }
+                        return false;
+                    }
+                    AppServicePanelAction::SendBotHelp => {
+                        if let Some(app_state) = scope.data.get::<AppState>() {
+                            self.send_botfather_command(
+                                cx,
+                                app_state,
+                                "/bothelp",
+                                "Sent `/bothelp` to BotFather.",
+                            );
+                        }
+                        return false;
+                    }
+                    AppServicePanelAction::Unbind => {
+                        if let Some(app_state) = scope.data.get::<AppState>() {
+                            if !room_props.app_service_room_bound {
+                                enqueue_popup_notification(
+                                    "This room is not currently bound to BotFather.",
+                                    PopupKind::Warning,
+                                    Some(4.0),
+                                );
+                            } else {
+                                match app_state
+                                    .bot_settings
+                                    .resolved_bot_user_id(current_user_id().as_deref())
+                                {
+                                    Ok(bot_user_id) => {
+                                        submit_async_request(MatrixRequest::SetRoomBotBinding {
+                                            room_id: room_props.room_name_id.room_id().clone(),
+                                            bound: false,
+                                            bot_user_id: bot_user_id.clone(),
+                                        });
+                                        enqueue_popup_notification(
+                                            format!("Removing BotFather {bot_user_id} from this room..."),
+                                            PopupKind::Info,
+                                            Some(4.0),
+                                        );
+                                    }
+                                    Err(error) => {
+                                        enqueue_popup_notification(error, PopupKind::Error, Some(4.0));
+                                    }
+                                }
+                            }
+                        } else {
+                            enqueue_popup_notification(
+                                "App state is unavailable, so BotFather could not be removed from this room.",
+                                PopupKind::Error,
+                                Some(4.0),
+                            );
+                        }
+                        self.set_app_service_actions_visible(cx, false);
+                        return false;
+                    }
+                    _ => {}
+                }
+
+                match action.downcast_ref::<CreateBotModalAction>() {
+                    Some(CreateBotModalAction::Close) => {
+                        self.close_create_bot_modal(cx);
+                        return false;
+                    }
+                    Some(CreateBotModalAction::Submit(request)) => {
+                        let Some(app_state) = scope.data.get::<AppState>() else {
+                            enqueue_popup_notification(
+                                "App state is unavailable, so the create-bot command was not sent.",
+                                PopupKind::Error,
+                                Some(4.0),
+                            );
+                            self.close_create_bot_modal(cx);
+                            return false;
+                        };
+                        self.send_create_bot_command(
+                            cx,
+                            app_state,
+                            &request.username,
+                            &request.display_name,
+                            request.system_prompt.as_deref(),
+                        );
+                        return false;
+                    }
+                    None => {}
+                }
+
+                match action.downcast_ref::<DeleteBotModalAction>() {
+                    Some(DeleteBotModalAction::Close) => {
+                        self.close_delete_bot_modal(cx);
+                        return false;
+                    }
+                    Some(DeleteBotModalAction::Submit(request)) => {
+                        let Some(app_state) = scope.data.get::<AppState>() else {
+                            enqueue_popup_notification(
+                                "App state is unavailable, so the delete-bot command was not sent.",
+                                PopupKind::Error,
+                                Some(4.0),
+                            );
+                            self.close_delete_bot_modal(cx);
+                            return false;
+                        };
+                        self.send_delete_bot_command(
+                            cx,
+                            app_state,
+                            &request.user_id_or_localpart,
+                        );
+                        return false;
+                    }
+                    None => {}
+                }
+
+                match action
+                    .as_widget_action()
+                    .widget_uid_eq(room_screen_widget_uid)
+                    .cast()
+                {
+                    MessageAction::ToggleAppServiceActions => {
+                        if room_props.timeline_kind.thread_root_event_id().is_some() {
+                            enqueue_popup_notification(
+                                "Bot commands are only supported in the main room timeline.",
+                                PopupKind::Warning,
+                                Some(4.0),
+                            );
+                        } else if !room_props.app_service_enabled {
+                            enqueue_popup_notification(
+                                "Enable App Service in Settings before using /bot.",
+                                PopupKind::Warning,
+                                Some(4.0),
+                            );
+                        } else if !room_props.app_service_room_bound {
+                            enqueue_popup_notification(
+                                "Bind BotFather to this room before using /bot.",
+                                PopupKind::Warning,
+                                Some(4.0),
+                            );
+                        } else {
+                            self.toggle_app_service_actions(cx);
+                        }
+                        return false;
+                    }
+                    _ => {}
                 }
 
                 // Handle the action that requests to show the user profile sliding pane.
@@ -1097,7 +1664,7 @@ impl Widget for RoomScreen {
 
             // Set the portal list's range based on the number of timeline items.
             let tl_items = &tl_state.items;
-            let last_item_id = tl_items.len();
+            let last_item_id = tl_items.len() + usize::from(self.show_app_service_actions);
 
             let list = list_ref.deref_mut();
             list.set_item_range(cx, 0, last_item_id);
@@ -1105,6 +1672,9 @@ impl Widget for RoomScreen {
             while let Some(item_id) = list.next_visible_item(cx) {
                 let item = {
                     let tl_idx = item_id;
+                    if self.show_app_service_actions && tl_idx == tl_items.len() {
+                        list.item(cx, item_id, id!(AppServicePanel))
+                    } else {
                     let Some(timeline_item) = tl_items.get(tl_idx) else {
                         // This shouldn't happen (unless the timeline gets corrupted or some other weird error),
                         // but we can always safely fill the item with an empty widget that takes up no space.
@@ -1242,6 +1812,7 @@ impl Widget for RoomScreen {
                         tl_state.profile_drawn_since_last_update.insert(tl_idx .. tl_idx + 1);
                     }
                     item
+                    }
                 };
                 item.draw_all(cx, scope);
             }
@@ -1264,6 +1835,174 @@ impl Widget for RoomScreen {
 impl RoomScreen {
     fn room_id(&self) -> Option<&OwnedRoomId> {
         self.room_name_id.as_ref().map(|r| r.room_id())
+    }
+
+    fn set_app_service_actions_visible(&mut self, cx: &mut Cx, visible: bool) {
+        self.show_app_service_actions = visible;
+        self.redraw(cx);
+    }
+
+    fn toggle_app_service_actions(&mut self, cx: &mut Cx) {
+        self.set_app_service_actions_visible(cx, !self.show_app_service_actions);
+    }
+
+    fn close_create_bot_modal(&self, cx: &mut Cx) {
+        self.view.modal(ids!(create_bot_modal)).close(cx);
+    }
+
+    fn close_delete_bot_modal(&self, cx: &mut Cx) {
+        self.view.modal(ids!(delete_bot_modal)).close(cx);
+    }
+
+    fn open_create_bot_modal(&mut self, cx: &mut Cx) {
+        let Some(room_name_id) = self.room_name_id.clone() else { return };
+        self.set_app_service_actions_visible(cx, false);
+        self.view
+            .create_bot_modal(ids!(create_bot_modal_inner))
+            .show(cx, room_name_id);
+        self.view.modal(ids!(create_bot_modal)).open(cx);
+    }
+
+    fn open_delete_bot_modal(&mut self, cx: &mut Cx) {
+        let Some(room_name_id) = self.room_name_id.clone() else { return };
+        self.set_app_service_actions_visible(cx, false);
+        self.view
+            .delete_bot_modal(ids!(delete_bot_modal_inner))
+            .show(cx, room_name_id);
+        self.view.modal(ids!(delete_bot_modal)).open(cx);
+    }
+
+    fn reset_app_service_ui(&mut self, cx: &mut Cx) {
+        self.set_app_service_actions_visible(cx, false);
+        self.close_create_bot_modal(cx);
+        self.close_delete_bot_modal(cx);
+    }
+
+    fn send_botfather_command(
+        &mut self,
+        cx: &mut Cx,
+        app_state: &AppState,
+        command: &str,
+        success_message: &str,
+    ) {
+        let Some(timeline_kind) = self.timeline_kind.clone() else { return };
+        if timeline_kind.thread_root_event_id().is_some() {
+            enqueue_popup_notification(
+                "Bot commands are only supported in the main room timeline.",
+                PopupKind::Warning,
+                Some(4.0),
+            );
+            return;
+        }
+
+        let Some(room_id) = self.room_id().cloned() else { return };
+        if !app_state.bot_settings.enabled {
+            enqueue_popup_notification(
+                "Enable App Service before using BotFather commands in a room.",
+                PopupKind::Warning,
+                Some(4.0),
+            );
+            return;
+        }
+        if !app_state.bot_settings.is_room_bound(&room_id) {
+            enqueue_popup_notification(
+                "Bind BotFather to this room before using BotFather commands.",
+                PopupKind::Warning,
+                Some(4.0),
+            );
+            return;
+        }
+
+        submit_async_request(MatrixRequest::SendMessage {
+            timeline_kind,
+            message: RoomMessageEventContent::text_plain(command),
+            replied_to: None,
+            #[cfg(feature = "tsp")]
+            sign_with_tsp: false,
+        });
+
+        enqueue_popup_notification(success_message.to_string(), PopupKind::Info, Some(4.0));
+        self.set_app_service_actions_visible(cx, false);
+    }
+
+    fn send_create_bot_command(
+        &mut self,
+        cx: &mut Cx,
+        app_state: &AppState,
+        username: &str,
+        display_name: &str,
+        system_prompt: Option<&str>,
+    ) {
+        let Some(timeline_kind) = self.timeline_kind.clone() else { return };
+        if timeline_kind.thread_root_event_id().is_some() {
+            enqueue_popup_notification(
+                "Bot creation commands are only supported in the main room timeline.",
+                PopupKind::Warning,
+                Some(4.0),
+            );
+            return;
+        }
+
+        let Some(room_id) = self.room_id().cloned() else { return };
+        if !app_state.bot_settings.enabled {
+            enqueue_popup_notification(
+                "Enable App Service before creating bots in a room.",
+                PopupKind::Warning,
+                Some(4.0),
+            );
+            return;
+        }
+        if !app_state.bot_settings.is_room_bound(&room_id) {
+            enqueue_popup_notification(
+                "Bind BotFather to this room before creating a bot.",
+                PopupKind::Warning,
+                Some(4.0),
+            );
+            return;
+        }
+
+        let command = format_create_bot_command(username, display_name, system_prompt);
+        submit_async_request(MatrixRequest::SendMessage {
+            timeline_kind,
+            message: RoomMessageEventContent::text_plain(command),
+            replied_to: None,
+            #[cfg(feature = "tsp")]
+            sign_with_tsp: false,
+        });
+
+        enqueue_popup_notification(
+            format!("Sent `/createbot` for `{username}` to BotFather."),
+            PopupKind::Info,
+            Some(4.0),
+        );
+        self.close_create_bot_modal(cx);
+    }
+
+    fn send_delete_bot_command(
+        &mut self,
+        cx: &mut Cx,
+        app_state: &AppState,
+        user_id_or_localpart: &str,
+    ) {
+        let matrix_user_id = match resolve_delete_bot_user_id(
+            user_id_or_localpart,
+            current_user_id().as_deref(),
+        ) {
+            Ok(user_id) => user_id,
+            Err(error) => {
+                enqueue_popup_notification(error, PopupKind::Error, Some(4.0));
+                return;
+            }
+        };
+
+        let command = format_delete_bot_command(matrix_user_id.as_ref());
+        self.send_botfather_command(
+            cx,
+            app_state,
+            &command,
+            &format!("Sent `/deletebot` for {matrix_user_id} to BotFather."),
+        );
+        self.close_delete_bot_modal(cx);
     }
 
     /// Processes all pending background updates to the currently-shown timeline.
@@ -2114,6 +2853,8 @@ impl RoomScreen {
                 MessageAction::ActionBarOpen { .. } => { }
                 // This isn't yet handled, as we need to completely redesign it.
                 MessageAction::ActionBarClose => { }
+                // This is handled earlier in the RoomScreen event pipeline.
+                MessageAction::ToggleAppServiceActions => { }
                 MessageAction::None => { }
             }
         }
@@ -2491,6 +3232,7 @@ impl RoomScreen {
         }
 
         self.hide_timeline();
+        self.reset_app_service_ui(cx);
         // Reset the the state of the inner loading pane.
         self.loading_pane(ids!(loading_pane)).take_state();
 
@@ -2631,6 +3373,8 @@ pub struct RoomScreenProps {
     pub timeline_kind: TimelineKind,
     pub room_members: Option<Arc<Vec<RoomMember>>>,
     pub room_avatar_url: Option<OwnedMxcUri>,
+    pub app_service_enabled: bool,
+    pub app_service_room_bound: bool,
 }
 
 
@@ -4579,7 +5323,113 @@ pub enum MessageAction {
     },
     /// The user requested closing the message action bar
     ActionBarClose,
+    /// The user requested toggling the in-room app service quick actions card.
+    ToggleAppServiceActions,
     None,
+}
+
+#[derive(Clone, Debug, DefaultNone)]
+pub enum AppServicePanelAction {
+    Dismiss,
+    OpenCreateBotModal,
+    OpenDeleteBotModal,
+    SendListBots,
+    SendBotHelp,
+    Unbind,
+    None,
+}
+
+#[derive(Live, LiveHook, Widget)]
+pub struct AppServicePanel {
+    #[deref] view: View,
+}
+
+impl Widget for AppServicePanel {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+
+        let room_screen_props = scope
+            .props
+            .get::<RoomScreenProps>()
+            .expect("BUG: RoomScreenProps should be available in Scope::props for AppServicePanel");
+
+        if let Event::Actions(actions) = event {
+            if self
+                .view
+                .button(ids!(bubble.header.dismiss_button))
+                .clicked(actions)
+            {
+                cx.widget_action(
+                    room_screen_props.room_screen_widget_uid,
+                    &scope.path,
+                    AppServicePanelAction::Dismiss,
+                );
+            }
+
+            if self
+                .view
+                .button(ids!(keyboard.first_row.create_button))
+                .clicked(actions)
+            {
+                cx.widget_action(
+                    room_screen_props.room_screen_widget_uid,
+                    &scope.path,
+                    AppServicePanelAction::OpenCreateBotModal,
+                );
+            }
+
+            if self
+                .view
+                .button(ids!(keyboard.first_row.list_button))
+                .clicked(actions)
+            {
+                cx.widget_action(
+                    room_screen_props.room_screen_widget_uid,
+                    &scope.path,
+                    AppServicePanelAction::SendListBots,
+                );
+            }
+
+            if self
+                .view
+                .button(ids!(keyboard.second_row.delete_button))
+                .clicked(actions)
+            {
+                cx.widget_action(
+                    room_screen_props.room_screen_widget_uid,
+                    &scope.path,
+                    AppServicePanelAction::OpenDeleteBotModal,
+                );
+            }
+
+            if self
+                .view
+                .button(ids!(keyboard.second_row.help_button))
+                .clicked(actions)
+            {
+                cx.widget_action(
+                    room_screen_props.room_screen_widget_uid,
+                    &scope.path,
+                    AppServicePanelAction::SendBotHelp,
+                );
+            }
+
+            if self
+                .view
+                .button(ids!(keyboard.third_row.unbind_button))
+                .clicked(actions)
+            {
+                cx.widget_action(
+                    room_screen_props.room_screen_widget_uid,
+                    &scope.path,
+                    AppServicePanelAction::Unbind,
+                );
+            }
+        }
+    }
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.view.draw_walk(cx, scope, walk)
+    }
 }
 
 /// A widget representing a single message of any kind within a room timeline.

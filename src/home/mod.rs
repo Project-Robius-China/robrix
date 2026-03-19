@@ -1,6 +1,8 @@
 use makepad_widgets::Cx;
 
 pub mod add_room;
+pub mod create_bot_modal;
+pub mod delete_bot_modal;
 pub mod edited_indicator;
 pub mod editing_pane;
 pub mod event_source_modal;
@@ -36,6 +38,8 @@ pub fn live_design(cx: &mut Cx) {
     loading_pane::live_design(cx);
     location_preview::live_design(cx);
     add_room::live_design(cx);
+    create_bot_modal::live_design(cx);
+    delete_bot_modal::live_design(cx);
     space_lobby::live_design(cx);
     rooms_list_entry::live_design(cx);
     rooms_list_header::live_design(cx);

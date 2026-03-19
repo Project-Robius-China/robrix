@@ -584,6 +584,12 @@ pub enum MatrixRequest {
         room_id: OwnedRoomId,
         user_id: OwnedUserId,
     },
+    /// Request to bind or unbind the configured botfather for the given room.
+    SetRoomBotBinding {
+        room_id: OwnedRoomId,
+        bound: bool,
+        bot_user_id: OwnedUserId,
+    },
     /// Request to join the given room.
     JoinRoom {
         room_id: OwnedRoomId,
@@ -1214,6 +1220,67 @@ async fn matrix_worker_task(
                             user_id,
                             error: matrix_sdk::Error::UnknownError("Room/Space not found in client's known list.".into()),
                         })
+                    }
+                });
+            }
+
+            MatrixRequest::SetRoomBotBinding { room_id, bound, bot_user_id } => {
+                let Some(client) = get_client() else { continue };
+                let _bot_binding_task = Handle::current().spawn(async move {
+                    let Some(room) = client.get_room(&room_id) else {
+                        let error_message = format!("Room {room_id} was not found for the bot binding request.");
+                        error!("{error_message}");
+                        enqueue_popup_notification(error_message, PopupKind::Error, None);
+                        return;
+                    };
+
+                    let membership_result = if bound {
+                        room.invite_user_by_id(&bot_user_id).await
+                    } else {
+                        room.kick_user(&bot_user_id, Some("Robrix app service unbind")).await
+                    };
+
+                    match membership_result {
+                        Ok(()) => {
+                            Cx::post_action(AppStateAction::BotRoomBindingUpdated {
+                                room_id,
+                                bound,
+                                bot_user_id: Some(bot_user_id),
+                                warning: None,
+                            });
+                        }
+                        Err(error) => {
+                            let membership_exists = room
+                                .get_member_no_sync(&bot_user_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some();
+                            let should_mark_bound = if bound { membership_exists } else { false };
+
+                            if should_mark_bound != bound {
+                                error!(
+                                    "Failed to {} BotFather {bot_user_id} for room {room_id}: {error:?}",
+                                    if bound { "invite" } else { "remove" }
+                                );
+                                enqueue_popup_notification(
+                                    format!(
+                                        "Failed to {} BotFather {bot_user_id}: {error}",
+                                        if bound { "invite" } else { "remove" }
+                                    ),
+                                    PopupKind::Error,
+                                    None,
+                                );
+                                return;
+                            }
+
+                            Cx::post_action(AppStateAction::BotRoomBindingUpdated {
+                                room_id,
+                                bound,
+                                bot_user_id: Some(bot_user_id),
+                                warning: Some(error.to_string()),
+                            });
+                        }
                     }
                 });
             }
@@ -1871,8 +1938,8 @@ async fn matrix_worker_task(
                         }
                     };
 
-                    if let Some(replied_to_info) = replied_to {
-                        let reply_content = match timeline
+                    let content_to_send = if let Some(replied_to_info) = replied_to {
+                        match timeline
                             .room()
                             .make_reply_event(message.into(), replied_to_info)
                             .await
@@ -1887,21 +1954,20 @@ async fn matrix_worker_task(
                                 );
                                 return;
                             }
-                        };
-                        match timeline.send(reply_content.into()).await {
-                            Ok(_send_handle) => log!("Sent reply message to {timeline_kind}."),
-                            Err(_e) => {
-                                error!("Failed to send reply message to {timeline_kind}: {_e:?}");
-                                enqueue_popup_notification(format!("Failed to send reply: {_e}"), PopupKind::Error, None);
-                            }
                         }
                     } else {
-                        match timeline.send(message.into()).await {
-                            Ok(_send_handle) => log!("Sent message to {timeline_kind}."),
-                            Err(_e) => {
-                                error!("Failed to send message to {timeline_kind}: {_e:?}");
-                                enqueue_popup_notification(format!("Failed to send message: {_e}"), PopupKind::Error, None);
-                            }
+                        message
+                    };
+
+                    match timeline.send(content_to_send.into()).await {
+                        Ok(_send_handle) => log!("Sent message to {timeline_kind}."),
+                        Err(_e) => {
+                            error!("Failed to send message to {timeline_kind}: {_e:?}");
+                            enqueue_popup_notification(
+                                format!("Failed to send message: {_e}"),
+                                PopupKind::Error,
+                                None,
+                            );
                         }
                     }
                     SignalToUI::set_ui_signal();
