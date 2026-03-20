@@ -17,7 +17,7 @@ use ruma::room::JoinRuleSummary;
 use tokio::sync::mpsc::UnboundedSender;
 use crate::shared::avatar::AvatarState;
 use crate::shared::expand_arrow::ExpandArrow;
-use crate::utils::replace_linebreaks_separators;
+use crate::utils::{replace_linebreaks_separators, is_touch_primary_platform};
 use crate::{
     app::AppStateAction,
     avatar_cache::{self, AvatarCacheEntry},
@@ -697,7 +697,15 @@ impl Widget for SubspaceEntry {
                 let is_within_buttons_view = self.show_buttons_view
                     && self.view.child_by_path(ids!(buttons_view)).area().rect(cx).contains(fe.abs);
                 if !is_within_buttons_view {
-                    if let Some(room_id) = self.room_id.as_ref() {
+                    // On touch/mobile platforms, first tap shows buttons, second tap performs action
+                    if is_touch_primary_platform() && !self.show_buttons_view {
+                        // First tap on mobile: show the buttons_view
+                        self.show_buttons_view = true;
+                        self.view.child_by_path(ids!(buttons_view)).set_visible(cx, true);
+                        self.animator_play(cx, ids!(hover.on));
+                        self.redraw(cx);
+                    } else if let Some(room_id) = self.room_id.as_ref() {
+                        // Second tap (or desktop): perform the action
                         if self.is_space {
                             // Toggle expansion and animate the arrow
                             self.is_expanded = !self.is_expanded;
@@ -713,6 +721,13 @@ impl Widget for SubspaceEntry {
                                 self.widget_uid(),
                                 SubspaceEntryAction::RoomClicked { room_id: room_id.clone() },
                             );
+                        }
+                        // On mobile, hide buttons after action
+                        if is_touch_primary_platform() {
+                            self.show_buttons_view = false;
+                            self.view.child_by_path(ids!(buttons_view)).set_visible(cx, false);
+                            self.animator_play(cx, ids!(hover.off));
+                            self.redraw(cx);
                         }
                     }
                 }

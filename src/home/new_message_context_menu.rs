@@ -119,6 +119,12 @@ script_mod! {
                 text: "Reply"
             }
 
+            reply_in_thread_button := mod.widgets.NewMessageContextMenuButton {
+                draw_icon +: { svg: crate_resource("self://resources/icons/double_chat.svg") }
+                icon_walk +: { margin: Inset{top: 1, right: 3}}
+                text: "Reply in Thread"
+            }
+
             divider_after_react_reply := LineH {
                 margin: Inset{top: 3, bottom: 3}
                 width: Fill,
@@ -380,8 +386,15 @@ impl WidgetMatchEvent for NewMessageContextMenu {
         }
         else if self.button(cx, ids!(reply_button)).clicked(actions) {
             cx.widget_action(
-                details.room_screen_widget_uid, 
+                details.room_screen_widget_uid,
                 MessageAction::Reply(details.clone()),
+            );
+            close_menu = true;
+        }
+        else if self.button(cx, ids!(reply_in_thread_button)).clicked(actions) {
+            cx.widget_action(
+                details.room_screen_widget_uid,
+                MessageAction::ReplyInThread(details.clone()),
             );
             close_menu = true;
         }
@@ -500,6 +513,7 @@ impl NewMessageContextMenu {
 
         let react_button = self.view.button(cx, ids!(react_button));
         let reply_button = self.view.button(cx, ids!(reply_button));
+        let reply_in_thread_button = self.view.button(cx, ids!(reply_in_thread_button));
         let edit_button = self.view.button(cx, ids!(edit_message_button));
         let pin_button = self.view.button(cx, ids!(pin_button));
         let copy_text_button = self.view.button(cx, ids!(copy_text_button));
@@ -515,7 +529,9 @@ impl NewMessageContextMenu {
         // `copy_text_button`, `copy_link_to_message_button`, and `view_source_button`
         let show_react = details.abilities.contains(MessageAbilities::CanReact);
         let show_reply_to = details.abilities.contains(MessageAbilities::CanReplyTo);
-        let show_divider_after_react_reply = show_react || show_reply_to;
+        // Show "Reply in Thread" if user can reply and message has an event ID
+        let show_reply_in_thread = show_reply_to && details.event_id().is_some();
+        let show_divider_after_react_reply = show_react || show_reply_to || show_reply_in_thread;
         let show_edit = details.abilities.contains(MessageAbilities::CanEdit);
         let show_pin: bool;
         let show_copy_text = true;
@@ -531,6 +547,7 @@ impl NewMessageContextMenu {
         self.view.view(cx, ids!(react_view)).set_visible(cx, show_react);
         react_button.set_visible(cx, show_react);
         reply_button.set_visible(cx, show_reply_to);
+        reply_in_thread_button.set_visible(cx, show_reply_in_thread);
         self.view.view(cx, ids!(divider_after_react_reply)).set_visible(cx, show_divider_after_react_reply);
         edit_button.set_visible(cx, show_edit);
         if details.abilities.contains(MessageAbilities::CanPin) {
@@ -552,6 +569,7 @@ impl NewMessageContextMenu {
         // Reset the hover state of each button.
         react_button.reset_hover(cx);
         reply_button.reset_hover(cx);
+        reply_in_thread_button.reset_hover(cx);
         edit_button.reset_hover(cx);
         pin_button.reset_hover(cx);
         copy_text_button.reset_hover(cx);
@@ -571,6 +589,7 @@ impl NewMessageContextMenu {
         let num_visible_buttons =
             show_react as u8
             + show_reply_to as u8
+            + show_reply_in_thread as u8
             + show_edit as u8
             + show_pin as u8
             + show_copy_text as u8

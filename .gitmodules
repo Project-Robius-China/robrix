@@ -1,0 +1,4 @@
+[submodule "makepad"]
+	path = makepad
+	url = git@github.com:makepad/makepad.git
+	branch = dev

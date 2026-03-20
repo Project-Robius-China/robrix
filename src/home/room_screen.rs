@@ -43,7 +43,7 @@ use crate::shared::mentionable_text_input::MentionableTextInputAction;
 
 use rangemap::RangeSet;
 
-use super::{event_reaction_list::ReactionData, loading_pane::LoadingPaneRef, new_message_context_menu::{MessageAbilities, MessageDetails}, room_read_receipt::{self, populate_read_receipts, MAX_VISIBLE_AVATARS_IN_READ_RECEIPT}};
+use super::{event_reaction_list::ReactionData, loading_pane::LoadingPaneRef, members_panel::MembersPanelWidgetExt, new_message_context_menu::{MessageAbilities, MessageDetails}, room_read_receipt::{self, populate_read_receipts, MAX_VISIBLE_AVATARS_IN_READ_RECEIPT}};
 
 /// The maximum number of timeline items to search through
 /// when looking for a particular event.
@@ -102,13 +102,22 @@ script_mod! {
             border_color: (mod.widgets.COLOR_THREAD_SUMMARY_BORDER)
         }
 
-        thread_summary_count := Label {
-            width: Fit,
-            draw_text +: {
-                text_style: USERNAME_TEXT_STYLE { font_size: 11 }
-                color: (mod.widgets.COLOR_THREAD_SUMMARY_REPLY_COUNT)
+        animator: Animator {
+            hover: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_bg.color: (mod.widgets.COLOR_THREAD_SUMMARY_BG)
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_bg.color: #E8F0FE
+                    }
+                }
             }
-            text: ""
         }
 
         Icon {
@@ -118,11 +127,31 @@ script_mod! {
                 svg: crate_resource("self://resources/icons/double_chat.svg")
                 color: (mod.widgets.COLOR_THREAD_SUMMARY_REPLY_COUNT)
             }
-            icon_walk: Walk{ width: 25, height: 25, margin: Inset{top: 3, right: 7} }
+            icon_walk: Walk{ width: 20, height: 20, margin: Inset{right: 5} }
+        }
+
+        thread_summary_count := Label {
+            width: Fit,
+            draw_text +: {
+                text_style: USERNAME_TEXT_STYLE { font_size: 11 }
+                color: (mod.widgets.COLOR_THREAD_SUMMARY_REPLY_COUNT)
+            }
+            text: ""
         }
 
         thread_summary_latest := MessageHtml {
+            width: Fill,
             flow: Right,
+        }
+
+        view_thread_label := Label {
+            width: Fit,
+            margin: Inset{left: 5},
+            draw_text +: {
+                text_style: TEXT_SUB { font_size: 10 }
+                color: #1a73e8
+            }
+            text: "View thread"
         }
     }
 
@@ -575,9 +604,36 @@ script_mod! {
             // The top space should be displayed as an overlay at the top of the timeline.
             top_space := mod.widgets.TopSpace { }
 
+            // Floating members button at the top right
+            members_button_container := View {
+                width: Fill,
+                height: Fit,
+                align: Align{x: 1.0, y: 0.0},
+                padding: Inset{top: 10, right: 10},
+
+                members_button := RobrixNeutralIconButton {
+                    width: Fit,
+                    height: Fit,
+                    padding: Inset{top: 8, bottom: 8, left: 10, right: 10},
+                    spacing: 4,
+                    draw_bg +: {
+                        color: (COLOR_PRIMARY),
+                        border_color: (COLOR_DIVIDER_DARK),
+                        border_size: 1.0,
+                        border_radius: 4.0,
+                    }
+                    draw_icon.svg: (ICON_ADD_USER)
+                    icon_walk: Walk{width: 14, height: 14}
+                    text: ""
+                }
+            }
+
             // The user profile sliding pane should be displayed on top of other "static" subviews
             // (on top of all other views that are always visible).
             user_profile_sliding_pane := mod.widgets.UserProfileSlidingPane { }
+
+            // The members panel sliding pane for viewing room members
+            members_panel := mod.widgets.MembersPanel { }
 
             // The loading pane appears while the user is waiting for something in the room screen
             // to finish loading, e.g., when loading an older replied-to message.
@@ -655,6 +711,7 @@ impl Widget for RoomScreen {
         let room_screen_widget_uid = self.widget_uid();
         let portal_list = self.portal_list(cx, ids!(timeline.list));
         let user_profile_sliding_pane = self.user_profile_sliding_pane(cx, ids!(user_profile_sliding_pane));
+        let members_panel = self.members_panel(cx, ids!(members_panel));
         let loading_pane = self.loading_pane(cx, ids!(loading_pane));
 
         // Handle actions here before processing timeline updates.
@@ -770,6 +827,24 @@ impl Widget for RoomScreen {
             }
 
             self.handle_message_actions(cx, actions, &portal_list, &loading_pane);
+
+            // Handle the members button click to show the members panel
+            if self.button(cx, ids!(members_button)).clicked(actions) {
+                if let Some(tl) = self.tl_state.as_ref() {
+                    if let Some(room_members) = tl.room_members.as_ref() {
+                        let room_id = tl.kind.room_id().clone();
+                        let room_name = self.room_name_id.as_ref()
+                            .map(|rni| rni.display_name().to_string())
+                            .unwrap_or_default();
+                        members_panel.show_with_members(
+                            cx,
+                            room_members.clone(),
+                            room_id,
+                            room_name,
+                        );
+                    }
+                }
+            }
 
             for action in actions {
                 // Handle actions related to restoring the previously-saved state of rooms.
@@ -1052,6 +1127,16 @@ impl Widget for RoomScreen {
             return DrawStep::done();
         }
 
+        // Update the members button text with the member count
+        if let Some(tl) = self.tl_state.as_ref() {
+            let member_count = tl.room_members.as_ref().map(|m| m.len()).unwrap_or(0);
+            let members_button = self.button(cx, ids!(members_button));
+            if member_count > 0 {
+                members_button.set_text(cx, &format!("{}", member_count));
+            } else {
+                members_button.set_text(cx, "");
+            }
+        }
 
         let room_screen_widget_uid = self.widget_uid();
         while let Some(subview) = self.view.draw_walk(cx, scope, walk).step() {
@@ -1833,6 +1918,32 @@ impl RoomScreen {
                             details.item_id,
                             details.timeline_event_id,
                             self.room_id(),
+                        );
+                    }
+                }
+                MessageAction::ReplyInThread(details) => {
+                    // Determine the thread root: either from existing thread or this message starts a new thread
+                    let thread_root_event_id = details.thread_root_event_id.clone()
+                        .or_else(|| details.event_id().cloned());
+
+                    if let Some(thread_root_event_id) = thread_root_event_id {
+                        let Some(room_name_id) = self.room_name_id.as_ref().cloned() else {
+                            error!("MessageAction::ReplyInThread: room_name_id was None!");
+                            continue;
+                        };
+                        // Open the thread
+                        cx.widget_action(
+                            room_screen_widget_uid,
+                            RoomsListAction::Selected(SelectedRoom::Thread {
+                                room_name_id,
+                                thread_root_event_id,
+                            }),
+                        );
+                    } else {
+                        enqueue_popup_notification(
+                            "Cannot reply in thread: message has no event ID yet.",
+                            PopupKind::Error,
+                            Some(5.0),
                         );
                     }
                 }
@@ -4491,6 +4602,9 @@ pub enum MessageAction {
     },
     /// The user clicked the "reply" button on a message.
     Reply(MessageDetails),
+    /// The user clicked the "reply in thread" button on a message.
+    /// This opens or creates a thread and sets up reply mode within that thread.
+    ReplyInThread(MessageDetails),
     /// The user clicked the "edit" button on a message.
     Edit(MessageDetails),
     /// The user requested to edit their latest message in this room.

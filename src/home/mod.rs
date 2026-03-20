@@ -29,6 +29,7 @@ pub mod new_message_context_menu;
 pub mod room_context_menu;
 pub mod link_preview;
 pub mod room_image_viewer;
+pub mod members_panel;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     search_messages::script_mod(vm);
@@ -50,6 +51,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     invite_modal::script_mod(vm);
     invite_screen::script_mod(vm);
     tombstone_footer::script_mod(vm);
+    members_panel::script_mod(vm);
     room_screen::script_mod(vm);
     rooms_sidebar::script_mod(vm);
     welcome_screen::script_mod(vm);
