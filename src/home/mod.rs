@@ -30,6 +30,7 @@ pub mod room_context_menu;
 pub mod link_preview;
 pub mod room_image_viewer;
 pub mod members_panel;
+pub mod event_group;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     search_messages::script_mod(vm);
