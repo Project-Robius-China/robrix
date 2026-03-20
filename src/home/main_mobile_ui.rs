@@ -65,6 +65,10 @@ impl Widget for MainMobileUI {
                         cx.action(AppStateAction::UpgradedInviteToJoinedRoom(room_name.room_id().clone()));
                     }
                     RoomsListAction::OpenRoomContextMenu { .. } => {}
+                    RoomsListAction::RoomRemoved { room_id, new_state: _ } => {
+                        // TODO: Show NoLongerMemberView for the room if it's currently displayed
+                        log!("Room {room_id} was removed from the rooms list");
+                    }
                     RoomsListAction::None => {}
                 }
             }

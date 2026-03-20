@@ -646,38 +646,51 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::Shutdown = event {
-            let window_ref = self.ui.window(cx, ids!(main_window));
-            if let Err(e) = persistence::save_window_state(window_ref, cx) {
-                error!("Failed to save window state. Error: {e}");
-            }
-            if let Some(user_id) = current_user_id() {
-                let app_state = self.app_state.clone();
-                if let Err(e) = persistence::save_app_state(app_state, user_id) {
-                    error!("Failed to save app state. Error: {e}");
+        match event {
+            Event::Shutdown => {
+                let window_ref = self.ui.window(cx, ids!(main_window));
+                if let Err(e) = persistence::save_window_state(window_ref, cx) {
+                    error!("Failed to save window state. Error: {e}");
                 }
-            }
-            #[cfg(feature = "tsp")] {
-                // Save the TSP wallet state, if it exists, with a 3-second timeout.
-                let tsp_state = std::mem::take(&mut *crate::tsp::tsp_state_ref().lock().unwrap());
-                let res = crate::sliding_sync::block_on_async_with_timeout(
-                    Some(std::time::Duration::from_secs(3)),
-                    async move {
-                        match tsp_state.close_and_serialize().await {
-                            Ok(saved_state) => match persistence::save_tsp_state_async(saved_state).await {
-                                Ok(_) => { }
-                                Err(e) => error!("Failed to save TSP wallet state. Error: {e}"),
+                if let Some(user_id) = current_user_id() {
+                    let app_state = self.app_state.clone();
+                    if let Err(e) = persistence::save_app_state(app_state, user_id) {
+                        error!("Failed to save app state. Error: {e}");
+                    }
+                }
+                #[cfg(feature = "tsp")] {
+                    // Save the TSP wallet state, if it exists, with a 3-second timeout.
+                    let tsp_state = std::mem::take(&mut *crate::tsp::tsp_state_ref().lock().unwrap());
+                    let res = crate::sliding_sync::block_on_async_with_timeout(
+                        Some(std::time::Duration::from_secs(3)),
+                        async move {
+                            match tsp_state.close_and_serialize().await {
+                                Ok(saved_state) => match persistence::save_tsp_state_async(saved_state).await {
+                                    Ok(_) => { }
+                                    Err(e) => error!("Failed to save TSP wallet state. Error: {e}"),
+                                }
+                                Err(e) => error!("Failed to close and serialize TSP wallet state. Error: {e}"),
                             }
-                            Err(e) => error!("Failed to close and serialize TSP wallet state. Error: {e}"),
-                        }
-                    },
-                );
-                if let Err(_e) = res {
-                    error!("Failed to save TSP wallet state before app shutdown. Error: Timed Out.");
+                        },
+                    );
+                    if let Err(_e) = res {
+                        error!("Failed to save TSP wallet state before app shutdown. Error: Timed Out.");
+                    }
                 }
             }
+            Event::Pause => {
+                // App is being paused (e.g., on mobile when another app comes to foreground)
+                log!("App paused - may pause background sync tasks in future");
+            }
+            Event::Resume => {
+                // App is resuming from a paused state
+                log!("App resumed - may resume background sync tasks in future");
+            }
+            // Note: Event::AppGotFocus and Event::AppLostFocus are not available in current makepad version
+            // but can be added when makepad adds support for these events
+            _ => { }
         }
-        
+
         // Forward events to the MatchEvent trait implementation.
         self.match_event(cx, event);
         let scope = &mut Scope::with_data(&mut self.app_state);

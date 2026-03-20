@@ -32,7 +32,7 @@ use std::io;
 use hashbrown::{HashMap, HashSet};
 use crate::{
     app::AppStateAction, app_data_dir, avatar_cache::AvatarUpdate, event_preview::{BeforeText, TextPreview, text_preview_of_raw_timeline_event, text_preview_of_timeline_item}, home::{
-        add_room::KnockResultAction, invite_screen::{JoinRoomResultAction, LeaveRoomResultAction}, link_preview::{LinkPreviewData, LinkPreviewDataNonNumeric, LinkPreviewRateLimitResponse}, room_screen::{InviteResultAction, TimelineUpdate}, rooms_list::{self, InvitedRoomInfo, InviterInfo, JoinedRoomInfo, RoomsListUpdate, enqueue_rooms_list_update}, rooms_list_header::RoomsListHeaderAction, tombstone_footer::SuccessorRoomDetails
+        add_room::KnockResultAction, invite_screen::{JoinRoomResultAction, LeaveRoomResultAction}, link_preview::{LinkPreviewData, LinkPreviewDataNonNumeric, LinkPreviewRateLimitResponse}, room_screen::{InviteResultAction, TimelineUpdate, TypingUser}, rooms_list::{self, InvitedRoomInfo, InviterInfo, JoinedRoomInfo, RoomsListUpdate, enqueue_rooms_list_update}, rooms_list_header::RoomsListHeaderAction, tombstone_footer::SuccessorRoomDetails
     }, login::login_screen::LoginAction, logout::{logout_confirm_modal::LogoutAction, logout_state_machine::{LogoutConfig, is_logout_in_progress, logout_with_state_machine}}, media_cache::{MediaCacheEntry, MediaCacheEntryRef}, persistence::{self, ClientSessionPersisted, load_app_state}, profile::{
         user_profile::UserProfile,
         user_profile_cache::{UserProfileUpdate, enqueue_user_profile_update},
@@ -1436,15 +1436,21 @@ async fn matrix_worker_task(
                         // log!("Received typing notifications for room {room_id}: {user_ids:?}");
                         let mut users = Vec::with_capacity(user_ids.len());
                         for user_id in user_ids {
-                            users.push(
-                                main_timeline.room()
-                                    .get_member_no_sync(&user_id)
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .and_then(|m| m.display_name().map(|d| d.to_owned()))
-                                    .unwrap_or_else(|| user_id.to_string())
-                            );
+                            let member = main_timeline.room()
+                                .get_member_no_sync(&user_id)
+                                .await
+                                .ok()
+                                .flatten();
+                            let display_name = member.as_ref()
+                                .and_then(|m| m.display_name().map(|d| d.to_owned()))
+                                .unwrap_or_else(|| user_id.to_string());
+                            let avatar_url = member.as_ref()
+                                .and_then(|m| m.avatar_url().map(|u| u.to_owned()));
+                            users.push(TypingUser {
+                                user_id: user_id.clone(),
+                                display_name,
+                                avatar_url,
+                            });
                         }
                         if let Err(e) = timeline_update_sender.send(TimelineUpdate::TypingUsers { users }) {
                             error!("Error: timeline update sender couldn't send the list of typing users: {e:?}");
@@ -2997,6 +3003,8 @@ async fn add_new_room(
                 alt_aliases: new_room.room.alt_aliases(),
                 // we don't actually display the latest event for Invited rooms, so don't bother.
                 latest: None,
+                // TODO: fetch the invite timestamp from the invite event
+                invite_timestamp: None,
                 invite_state: Default::default(),
                 is_selected: false,
                 is_direct: new_room.is_direct,

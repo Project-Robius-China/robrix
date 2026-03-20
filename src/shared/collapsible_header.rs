@@ -76,6 +76,8 @@ pub enum HeaderCategory {
     RegularRooms,
     /// Joined rooms that the user has marked as low priority.
     LowPriority,
+    /// Server notice rooms (system messages from the homeserver).
+    ServerNotices,
     /// Rooms that the user has left.
     LeftRooms,
     #[default]
@@ -89,6 +91,7 @@ impl HeaderCategory {
             HeaderCategory::RegularRooms => "Rooms",
             HeaderCategory::DirectRooms => "People",
             HeaderCategory::LowPriority => "Low Priority",
+            HeaderCategory::ServerNotices => "Server Notices",
             HeaderCategory::LeftRooms => "Left Rooms",
             HeaderCategory::None => "",
         }

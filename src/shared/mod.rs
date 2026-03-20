@@ -20,6 +20,7 @@ pub mod unread_badge;
 pub mod verification_badge;
 pub mod restore_status_view;
 pub mod image_viewer;
+pub mod no_longer_member_view;
 
 
 pub fn script_mod(vm: &mut ScriptVm) {
@@ -44,4 +45,5 @@ pub fn script_mod(vm: &mut ScriptVm) {
     restore_status_view::script_mod(vm);
     confirmation_modal::script_mod(vm);
     image_viewer::script_mod(vm);
+    no_longer_member_view::script_mod(vm);
 }

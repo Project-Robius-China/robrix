@@ -249,6 +249,14 @@ pub enum RoomsListAction {
         details: RoomContextMenuDetails,
         pos: DVec2,
     },
+    /// A room was removed from the rooms list because the user is no longer a member.
+    ///
+    /// This is emitted when the user leaves, is kicked, or is banned from a room.
+    /// The `RoomScreen` should show the `NoLongerMemberView` if this room is currently displayed.
+    RoomRemoved {
+        room_id: OwnedRoomId,
+        new_state: RoomState,
+    },
     #[default]
     None,
 }
@@ -322,6 +330,8 @@ pub struct InvitedRoomInfo {
     pub inviter_info: Option<InviterInfo>,
     /// The timestamp and Html text content of the latest message in this room.
     pub latest: Option<(MilliSecondsSinceUnixEpoch, String)>,
+    /// The timestamp when the invite was sent, if available.
+    pub invite_timestamp: Option<MilliSecondsSinceUnixEpoch>,
     /// The state of how this invite is being handled by the client backend
     /// and what should be shown in the UI.
     ///
@@ -448,9 +458,15 @@ pub struct RoomsList {
     /// The list of regular (non-direct) joined rooms currently displayed in the UI.
     ///
     /// **Direct rooms are excluded** from this; they are in `displayed_direct_rooms`.
+    /// **Server notice rooms are excluded** from this; they are in `displayed_server_notice_rooms`.
     #[rust] displayed_regular_rooms: Vec<OwnedRoomId>,
     #[rust(true)] is_regular_rooms_header_expanded: bool,
     #[rust] regular_rooms_indexes: RoomCategoryIndexes,
+
+    /// The list of server notice rooms currently displayed in the UI.
+    #[rust] displayed_server_notice_rooms: Vec<OwnedRoomId>,
+    #[rust(true)] is_server_notice_rooms_header_expanded: bool,
+    #[rust] server_notice_rooms_indexes: RoomCategoryIndexes,
 
     /// The latest status message that should be displayed in the bottom status label.
     #[rust] status: String,
@@ -533,10 +549,13 @@ impl RoomsList {
                 RoomsListUpdate::AddJoinedRoom(joined_room) => {
                     let room_id = joined_room.room_name_id.room_id().clone();
                     let is_direct = joined_room.is_direct;
+                    let is_server_notice = joined_room.tags.contains_key(&TagName::ServerNotice);
                     let should_display = should_display_room!(self, &room_id, &joined_room);
                     let _replaced = self.all_joined_rooms.insert(room_id.clone(), joined_room);
                     if should_display {
-                        if is_direct {
+                        if is_server_notice {
+                            self.displayed_server_notice_rooms.push(room_id.clone());
+                        } else if is_direct {
                             self.displayed_direct_rooms.push(room_id.clone());
                         } else {
                             self.displayed_regular_rooms.push(room_id.clone());
@@ -685,14 +704,22 @@ impl RoomsList {
                     }
                 }
                 RoomsListUpdate::RemoveRoom { room_id, new_state } => {
-                    // TODO: once we have a dedicated LoadingScreen widget, we should emit an action
-                    // to replace this room (if it's currently open) with the LoadingScreen widget,
-                    // which should show whether it has been left, kicked, or banned,
-                    // and then options/buttons for the user to re-join it if desired.
+                    // Emit an action so the RoomScreen can show the NoLongerMemberView
+                    // if this room is currently being displayed.
+                    cx.widget_action(
+                        self.widget_uid(),
+                        RoomsListAction::RoomRemoved {
+                            room_id: room_id.clone(),
+                            new_state,
+                        }
+                    );
 
                     if let Some(removed) = self.all_joined_rooms.remove(&room_id) {
                         log!("Removed room {room_id} from the list of all joined rooms, now has state {new_state:?}");
-                        let list_to_remove_from = if removed.is_direct {
+                        let is_server_notice = removed.tags.contains_key(&TagName::ServerNotice);
+                        let list_to_remove_from = if is_server_notice {
+                            &mut self.displayed_server_notice_rooms
+                        } else if removed.is_direct {
                             &mut self.displayed_direct_rooms
                         } else {
                             &mut self.displayed_regular_rooms
@@ -715,6 +742,7 @@ impl RoomsList {
                     self.all_joined_rooms.clear();
                     self.displayed_direct_rooms.clear();
                     self.displayed_regular_rooms.clear();
+                    self.displayed_server_notice_rooms.clear();
                     self.invited_rooms.borrow_mut().clear();
                     self.displayed_invited_rooms.clear();
                     self.update_status();
@@ -777,6 +805,9 @@ impl RoomsList {
                     else if let Some(i) = self.displayed_invited_rooms.iter().position(|r| r == &room_id) {
                         self.displayed_invited_rooms.remove(i);
                     }
+                    else if let Some(i) = self.displayed_server_notice_rooms.iter().position(|r| r == &room_id) {
+                        self.displayed_server_notice_rooms.remove(i);
+                    }
                 }
                 RoomsListUpdate::ScrollToRoom(room_id) => {
                     // Ensure indexes are fresh in case rooms were added/removed in this batch of updates.
@@ -791,6 +822,9 @@ impl RoomsList {
                     }
                     else if let Some(invited_index) = self.displayed_invited_rooms.iter().position(|r| r == &room_id) {
                         self.invited_rooms_indexes.first_room_index + invited_index
+                    }
+                    else if let Some(server_notice_index) = self.displayed_server_notice_rooms.iter().position(|r| r == &room_id) {
+                        self.server_notice_rooms_indexes.first_room_index + server_notice_index
                     }
                     else { continue };
                     // Scroll to just above the room to make it more obviously visible.
@@ -873,7 +907,8 @@ impl RoomsList {
     fn update_status(&mut self) {
         let num_rooms = self.displayed_invited_rooms.len()
             + self.displayed_direct_rooms.len()
-            + self.displayed_regular_rooms.len();
+            + self.displayed_regular_rooms.len()
+            + self.displayed_server_notice_rooms.len();
 
         let mut text = match (self.display_filter.is_none(), num_rooms) {
             (true, 0)  => "No joined or invited rooms found".to_string(),
@@ -913,10 +948,11 @@ impl RoomsList {
     /// If `false`, the scroll position is preserved, unless it exceeds the new list length,
     /// in which case the logic in `draw_walk()` will limit it to the max valid index.
     fn update_displayed_rooms(&mut self, cx: &mut Cx, reset_scroll: bool) {
-        let (invited, regular, direct) = self.generate_displayed_rooms();
+        let (invited, regular, direct, server_notice) = self.generate_displayed_rooms();
         self.displayed_invited_rooms = invited;
         self.displayed_regular_rooms = regular;
         self.displayed_direct_rooms = direct;
+        self.displayed_server_notice_rooms = server_notice;
 
         self.update_status();
 
@@ -928,21 +964,26 @@ impl RoomsList {
     }
 
 
-    /// Generates a tuple of three kinds of displayed rooms (accounting for the current `display_filter`):
+    /// Generates a tuple of four kinds of displayed rooms (accounting for the current `display_filter`):
     /// 1. displayed_invited_rooms
     /// 2. displayed_regular_rooms
     /// 3. displayed_direct_rooms
+    /// 4. displayed_server_notice_rooms
     ///
     /// If `self.sort_fn` is `Some`, the rooms are ordered based on that function.
     /// Otherwise, the rooms are ordered based on `self.all_known_rooms_order` (the default).
-    fn generate_displayed_rooms(&self) -> (Vec<OwnedRoomId>,Vec<OwnedRoomId>, Vec<OwnedRoomId>) {
+    fn generate_displayed_rooms(&self) -> (Vec<OwnedRoomId>, Vec<OwnedRoomId>, Vec<OwnedRoomId>, Vec<OwnedRoomId>) {
         let mut new_displayed_invited_rooms = Vec::new();
         let mut new_displayed_regular_rooms = Vec::new();
         let mut new_displayed_direct_rooms = Vec::new();
+        let mut new_displayed_server_notice_rooms = Vec::new();
 
         let mut push_joined_room = |room_id: &OwnedRoomId, jr: &JoinedRoomInfo| {
             let room_id = room_id.clone();
-            if jr.is_direct {
+            let is_server_notice = jr.tags.contains_key(&TagName::ServerNotice);
+            if is_server_notice {
+                new_displayed_server_notice_rooms.push(room_id);
+            } else if jr.is_direct {
                 new_displayed_direct_rooms.push(room_id);
             } else {
                 new_displayed_regular_rooms.push(room_id);
@@ -984,21 +1025,23 @@ impl RoomsList {
             }
         }
 
-        (new_displayed_invited_rooms, new_displayed_regular_rooms, new_displayed_direct_rooms)
+        (new_displayed_invited_rooms, new_displayed_regular_rooms, new_displayed_direct_rooms, new_displayed_server_notice_rooms)
     }
 
     /// Calculates the indexes in the PortalList where the headers and rooms should be drawn.
     ///
-    /// Updates the following three fields:
+    /// Updates the following four fields:
     /// 1. `invited_rooms_indexes`: the indexes for the invited rooms,
     /// 2. `direct_rooms_indexes`: the indexes for the direct rooms (DMs / People),
     /// 3. `regular_rooms_indexes`: the indexes for the regular non-direct joined rooms.
+    /// 4. `server_notice_rooms_indexes`: the indexes for server notice rooms.
     fn recalculate_indexes(&mut self) {
         // Based on the various displayed room lists and is_expanded state of each room header,
         // calculate the indexes in the PortalList where the headers and rooms should be drawn.
         let should_show_invited_rooms_header = !self.displayed_invited_rooms.is_empty();
         let should_show_direct_rooms_header  = !self.displayed_direct_rooms.is_empty();
         let should_show_regular_rooms_header = !self.displayed_regular_rooms.is_empty();
+        let should_show_server_notice_rooms_header = !self.displayed_server_notice_rooms.is_empty();
 
         let index_of_invited_rooms_header = should_show_invited_rooms_header.then_some(0);
         let index_of_first_invited_room = should_show_invited_rooms_header as usize;
@@ -1031,6 +1074,17 @@ impl RoomsList {
                 0
             };
 
+        let index_of_server_notice_rooms_header = should_show_server_notice_rooms_header
+            .then_some(index_after_regular_rooms);
+        let index_of_first_server_notice_room = index_after_regular_rooms +
+            should_show_server_notice_rooms_header as usize;
+        let index_after_server_notice_rooms = index_of_first_server_notice_room +
+            if self.is_server_notice_rooms_header_expanded {
+                self.displayed_server_notice_rooms.len()
+            } else {
+                0
+            };
+
         self.invited_rooms_indexes = RoomCategoryIndexes {
             header_index: index_of_invited_rooms_header,
             first_room_index: index_of_first_invited_room,
@@ -1045,6 +1099,11 @@ impl RoomsList {
             header_index: index_of_regular_rooms_header,
             first_room_index: index_of_first_regular_room,
             after_rooms_index: index_after_regular_rooms,
+        };
+        self.server_notice_rooms_indexes = RoomCategoryIndexes {
+            header_index: index_of_server_notice_rooms_header,
+            first_room_index: index_of_first_server_notice_room,
+            after_rooms_index: index_after_server_notice_rooms,
         };
     }
 
@@ -1252,8 +1311,10 @@ impl Widget for RoomsList {
                         self.is_regular_rooms_header_expanded = !self.is_regular_rooms_header_expanded;
                     }
                     HeaderCategory::DirectRooms => {
-                        self.is_direct_rooms_header_expanded =
-                            !self.is_direct_rooms_header_expanded;
+                        self.is_direct_rooms_header_expanded = !self.is_direct_rooms_header_expanded;
+                    }
+                    HeaderCategory::ServerNotices => {
+                        self.is_server_notice_rooms_header_expanded = !self.is_server_notice_rooms_header_expanded;
                     }
                     _todo => todo!("Handle other header categories"),
                 }
@@ -1368,7 +1429,7 @@ impl Widget for RoomsList {
         // calculate the indexes in the PortalList where the headers and rooms should be drawn.
         self.recalculate_indexes();
 
-        let status_label_id = self.regular_rooms_indexes.after_rooms_index;
+        let status_label_id = self.server_notice_rooms_indexes.after_rooms_index;
         // Add one for the status label
         let total_count = status_label_id + 1;
 
@@ -1391,6 +1452,13 @@ impl Widget for RoomsList {
             portal_list_index.checked_sub(self.regular_rooms_indexes.first_room_index)
                 .and_then(|index| self.is_regular_rooms_header_expanded
                     .then(|| self.displayed_regular_rooms.get(index))
+                )
+                .flatten()
+        };
+        let get_server_notice_room_id = |portal_list_index: usize| {
+            portal_list_index.checked_sub(self.server_notice_rooms_indexes.first_room_index)
+                .and_then(|index| self.is_server_notice_rooms_header_expanded
+                    .then(|| self.displayed_server_notice_rooms.get(index))
                 )
                 .flatten()
         };
@@ -1502,6 +1570,40 @@ impl Widget for RoomsList {
                         }
                         // Pass the room info down to the RoomsListEntry widget via Scope.
                         scope = Scope::with_props(&*regular_room);
+                        item.draw_all(cx, &mut scope);
+                    } else {
+                        list.item(cx, portal_list_index, id!(empty)).draw_all(cx, &mut scope);
+                    }
+                }
+                else if self.server_notice_rooms_indexes.header_index == Some(portal_list_index) {
+                    let item = list.item(cx, portal_list_index, id!(collapsible_header));
+                    item.as_collapsible_header().set_details(
+                        cx,
+                        self.is_server_notice_rooms_header_expanded,
+                        HeaderCategory::ServerNotices,
+                        0, // Server notices typically don't have unread badges
+                    );
+                    item.draw_all(cx, &mut scope);
+                }
+                else if let Some(server_notice_room_id) = get_server_notice_room_id(portal_list_index) {
+                    if let Some(server_notice_room) = self.all_joined_rooms.get_mut(server_notice_room_id) {
+                        let item = list.item(cx, portal_list_index, id!(rooms_list_entry));
+                        server_notice_room.is_selected = self.current_active_room.as_ref()
+                            .is_some_and(|sel_room| sel_room.room_id() == server_notice_room_id);
+
+                        // Paginate the room if it hasn't been paginated yet.
+                        if PREPAGINATE_VISIBLE_ROOMS && !server_notice_room.has_been_paginated {
+                            server_notice_room.has_been_paginated = true;
+                            submit_async_request(MatrixRequest::PaginateTimeline {
+                                timeline_kind: TimelineKind::MainRoom {
+                                    room_id: server_notice_room.room_name_id.room_id().clone(),
+                                },
+                                num_events: 50,
+                                direction: PaginationDirection::Backwards,
+                            });
+                        }
+                        // Pass the room info down to the RoomsListEntry widget via Scope.
+                        scope = Scope::with_props(&*server_notice_room);
                         item.draw_all(cx, &mut scope);
                     } else {
                         list.item(cx, portal_list_index, id!(empty)).draw_all(cx, &mut scope);

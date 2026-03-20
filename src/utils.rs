@@ -1007,6 +1007,16 @@ impl From<(Option<RoomDisplayName>, OwnedRoomId)> for RoomNameId {
     }
 }
 
+
+/// Returns `true` if the current platform is primarily touch-based (e.g., Android, iOS).
+///
+/// This is useful for adapting UI behavior like showing buttons by default
+/// instead of requiring hover interactions.
+#[inline]
+pub const fn is_touch_primary_platform() -> bool {
+    cfg!(any(target_os = "android", target_os = "ios"))
+}
+
 /// Returns a text avatar string containing the first character of the room name.
 ///
 /// Skips the first character if it is a `#` or `!`, the sigils used for Room aliases and Room IDs.

@@ -2632,6 +2632,17 @@ pub enum RoomScreenTooltipActions {
     None,
 }
 
+/// Information about a user who is currently typing in a room.
+#[derive(Clone, Debug)]
+pub struct TypingUser {
+    /// The user's unique Matrix ID.
+    pub user_id: OwnedUserId,
+    /// The user's displayable name, or their user ID if no display name is available.
+    pub display_name: String,
+    /// The MXC URI of the user's avatar, if available.
+    pub avatar_url: Option<OwnedMxcUri>,
+}
+
 /// A message that is sent from a background async task to a room's timeline view
 /// for the purpose of update the Timeline UI contents or metadata.
 pub enum TimelineUpdate {
@@ -2715,8 +2726,8 @@ pub enum TimelineUpdate {
     MediaFetched(MediaRequestParameters),
     /// A notice that one or more members of a this room are currently typing.
     TypingUsers {
-        /// The list of users (their displayable name) who are currently typing in this room.
-        users: Vec<String>,
+        /// The list of users who are currently typing in this room.
+        users: Vec<TypingUser>,
     },
     /// The result of a pin/unpin request ([`MatrixRequest::PinEvent`]).
     PinResult {

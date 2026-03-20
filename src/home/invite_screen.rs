@@ -192,6 +192,8 @@ script_mod! {
 pub struct InviteDetails {
     pub room_info: BasicRoomDetails,
     pub inviter: Option<InviterInfo>,
+    /// The timestamp when the invite was sent, if available.
+    pub invite_timestamp: Option<matrix_sdk::ruma::MilliSecondsSinceUnixEpoch>,
 }
 impl Deref for InviteDetails {
     type Target = BasicRoomDetails;
@@ -507,6 +509,7 @@ impl InviteScreen {
                     room_avatar: invite.room_avatar.clone(),
                 },
                 inviter: invite.inviter_info.clone(),
+                invite_timestamp: invite.invite_timestamp,
             });
             self.invite_state = invite.invite_state;
             self.has_shown_confirmation = false;

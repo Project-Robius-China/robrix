@@ -5,6 +5,10 @@
 
 use makepad_widgets::{image_cache::ImageCacheImpl, *};
 use matrix_sdk::ruma::events::room::MediaSource;
+/// Maximum height for image thumbnails in the timeline (Issue #650)
+/// This prevents very tall images from dominating the view
+const IMAGE_THUMBNAIL_MAX_HEIGHT: f64 = 300.0;
+
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
@@ -35,18 +39,18 @@ script_mod! {
         image_view := View {
             visible: false,
             cursor: MouseCursor.Default, // Use `Hand` once we support clicking on the image
-            width: Fill, height: Fit,
+            width: Fill, height: Fit{max: 300.0},
             image := Image {
-                width: Fill, height: Fit,
+                width: Fill, height: Fit{max: 300.0},
                 fit: ImageFit.Smallest,
             }
         }
         default_image_view := View {
             visible: false,
             cursor: MouseCursor.Default, // Use `Hand` once we support clicking on the image
-            width: Fill, height: Fit,
+            width: Fill, height: Fit{max: 300.0},
             image := Image {
-                width: Fill, height: Fit,
+                width: Fill, height: Fit{max: 300.0},
                 fit: ImageFit.Smallest,
                 src: (mod.widgets.DEFAULT_IMAGE)
             }
