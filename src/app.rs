@@ -247,10 +247,8 @@ fn init_file_logging() -> Option<()> {
         return None;
     }
 
-    let log_dir = crate::app_data_dir();
-
-    // Create logs subdirectory
-    let logs_dir = log_dir.join("logs");
+    // Get platform-specific logs directory
+    let logs_dir = logs_dir();
     std::fs::create_dir_all(&logs_dir).ok()?;
 
     // Create log file with timestamp
@@ -294,10 +292,51 @@ fn write_to_log_file(message: &str) {
     }
 }
 
-/// Returns the path to the logs directory.
-/// Returns `None` if not on a desktop platform.
+/// Returns the path to the logs directory using platform-standard locations.
+///
+/// Platform-specific paths:
+/// - macOS: `~/Library/Logs/Robrix/`
+/// - Windows: `%APPDATA%/Robrix/logs/`
+/// - Linux: `~/.local/share/robrix/logs/` (or `$XDG_DATA_HOME/robrix/logs/`)
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn logs_dir() -> std::path::PathBuf {
+    use std::path::PathBuf;
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS standard log location: ~/Library/Logs/Robrix/
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Logs")
+                .join("Robrix");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: %APPDATA%/Robrix/logs/
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            return PathBuf::from(appdata).join("Robrix").join("logs");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Linux: Use XDG_DATA_HOME if set, otherwise ~/.local/share/
+        if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
+            return PathBuf::from(xdg_data).join("robrix").join("logs");
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("robrix")
+                .join("logs");
+        }
+    }
+
+    // Fallback to app data directory
     crate::app_data_dir().join("logs")
 }
 
