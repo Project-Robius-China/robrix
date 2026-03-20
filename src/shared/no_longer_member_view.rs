@@ -47,7 +47,7 @@ script_mod! {
                         svg_file: (mod.widgets.ICON_LEAVE),
                         color: (COLOR_TEXT),
                     }
-                    icon_walk: Size{width: 48, height: 48}
+                    icon_walk: Walk{width: 48, height: 48}
                 }
             }
 
@@ -110,7 +110,7 @@ script_mod! {
                         svg_file: (mod.widgets.ICON_ENTER)
                         color: (COLOR_FG_ACCEPT_GREEN),
                     }
-                    icon_walk: Size{width: 16, height: 16, margin: Inset{left: -2, right: 2} }
+                    icon_walk: Walk{width: 16, height: 16, margin: Inset{left: -2, right: 2}}
 
                     draw_bg +: {
                         border_color: (COLOR_FG_ACCEPT_GREEN),
@@ -126,7 +126,7 @@ script_mod! {
                     width: 100,
                     align: Align{x: 0.5, y: 0.5}
                     padding: 12,
-                    icon_walk: Size{width: 0, height: 0}
+                    icon_walk: Walk{width: 0, height: 0}
 
                     draw_bg +: {
                         border_size: 0.75
