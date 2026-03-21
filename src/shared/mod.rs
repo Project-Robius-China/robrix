@@ -21,6 +21,8 @@ pub mod verification_badge;
 pub mod restore_status_view;
 pub mod image_viewer;
 pub mod no_longer_member_view;
+pub mod progress_bar;
+pub mod file_upload_modal;
 
 
 pub fn script_mod(vm: &mut ScriptVm) {
@@ -46,4 +48,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     confirmation_modal::script_mod(vm);
     image_viewer::script_mod(vm);
     no_longer_member_view::script_mod(vm);
+    progress_bar::script_mod(vm);
+    file_upload_modal::script_mod(vm);
 }

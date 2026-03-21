@@ -1,7 +1,7 @@
 use makepad_widgets::*;
 
 use crate::{
-    app::{AppState, AppStateAction, SelectedRoom}, home::{room_screen::RoomScreenWidgetExt, rooms_list::RoomsListAction, space_lobby::SpaceLobbyScreenWidgetExt}
+    app::{AppState, AppStateAction, SelectedRoom}, home::{room_screen::RoomScreenWidgetExt, rooms_list::RoomsListAction, space_lobby::SpaceLobbyScreenWidgetExt}, shared::no_longer_member_view::NoLongerMemberReason
 };
 
 use super::invite_screen::InviteScreenWidgetExt;
@@ -65,9 +65,25 @@ impl Widget for MainMobileUI {
                         cx.action(AppStateAction::UpgradedInviteToJoinedRoom(room_name.room_id().clone()));
                     }
                     RoomsListAction::OpenRoomContextMenu { .. } => {}
-                    RoomsListAction::RoomRemoved { room_id, new_state: _ } => {
-                        // TODO: Show NoLongerMemberView for the room if it's currently displayed
-                        log!("Room {room_id} was removed from the rooms list");
+                    RoomsListAction::RoomRemoved { room_id, new_state } => {
+                        // Show the NoLongerMemberView if this room is currently displayed.
+                        log!("Room {room_id} was removed from the rooms list with state {new_state:?}");
+                        let app_state = scope.data.get::<AppState>().unwrap();
+                        let matches = match app_state.selected_room.as_ref() {
+                            Some(SelectedRoom::JoinedRoom { room_name_id }) => {
+                                room_name_id.room_id() == &room_id
+                            }
+                            Some(SelectedRoom::Thread { room_name_id, .. }) => {
+                                room_name_id.room_id() == &room_id
+                            }
+                            _ => false,
+                        };
+                        if matches {
+                            let reason = NoLongerMemberReason::from_room_state(new_state)
+                                .unwrap_or(NoLongerMemberReason::Left);
+                            self.view.room_screen(cx, ids!(room_screen))
+                                .show_no_longer_member(cx, reason);
+                        }
                     }
                     RoomsListAction::None => {}
                 }

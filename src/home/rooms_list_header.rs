@@ -1,6 +1,6 @@
 //! The RoomsListHeader contains the title label and loading spinner for rooms list.
 //!
-//! This widget is designed to be reused across both Desktop and Mobile variants 
+//! This widget is designed to be reused across both Desktop and Mobile variants
 //! of the RoomsSideBar to avoid code duplication.
 
 use std::mem::discriminant;
@@ -9,6 +9,25 @@ use makepad_widgets::*;
 use matrix_sdk_ui::sync_service::State;
 
 use crate::{home::navigation_tab_bar::{NavigationBarAction, SelectedTab}, shared::{image_viewer::{ImageViewerAction, ImageViewerError, LoadState}, popup_list::{PopupKind, enqueue_popup_notification}}};
+
+/// Filter options for the rooms list dropdown.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum RoomFilterOption {
+    #[default]
+    All,
+    Unread,
+    Favorites,
+    People,
+}
+
+/// Sort options for the rooms list dropdown.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum RoomSortOption {
+    #[default]
+    Activity,
+    Alphabetical,
+    Unread,
+}
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -22,19 +41,37 @@ script_mod! {
         flow: Right,
         spacing: 3,
 
-        header_title := Label {
-            width: Fill,
+        clickable_header := View {
+            width: Fit,
             height: Fit,
-            padding: 0
-            margin: Inset{left: 5, top: -1}
-            flow: Right, // do not wrap
-            text: "All Rooms"
-            draw_text +: {
-                color: #x0
-                text_style: TITLE_TEXT {}
-                flow: Flow.Right{wrap: true}
+            flow: Right,
+            spacing: 4,
+            cursor: MouseCursor.Hand,
+
+            header_title := Label {
+                width: Fit,
+                height: Fit,
+                padding: 0
+                margin: Inset{left: 5, top: -1}
+                flow: Right,
+                text: "All Rooms"
+                draw_text +: {
+                    color: #x0
+                    text_style: TITLE_TEXT {}
+                    flow: Flow.Right{wrap: true}
+                }
             }
-        },
+
+            dropdown_arrow := Icon {
+                draw_icon +: {
+                    svg: (ICON_TRIANGLE_DOWN),
+                    color: #666,
+                }
+                icon_walk: Walk{width: 12, height: 12, margin: Inset{top: 4}}
+            }
+        }
+
+        View { width: Fill, height: Fit }
 
         View {
             width: Fit, height: Fit,
@@ -83,6 +120,8 @@ pub struct RoomsListHeader {
     #[deref] view: View,
 
     #[rust(State::Idle)] sync_state: State,
+    #[rust(RoomFilterOption::All)] filter_option: RoomFilterOption,
+    #[rust(RoomSortOption::Activity)] sort_option: RoomSortOption,
 }
 
 impl Widget for RoomsListHeader {
@@ -122,6 +161,16 @@ impl Widget for RoomsListHeader {
                         self.redraw(cx);
                         continue;
                     }
+                    Some(RoomsListHeaderAction::SetFilter(filter)) => {
+                        self.filter_option = *filter;
+                        self.redraw(cx);
+                        continue;
+                    }
+                    Some(RoomsListHeaderAction::SetSort(sort)) => {
+                        self.sort_option = *sort;
+                        self.redraw(cx);
+                        continue;
+                    }
                     _ => {}
                 }
 
@@ -136,6 +185,32 @@ impl Widget for RoomsListHeader {
                     continue;
                 }
             }
+        }
+
+        // Handle clicks on the clickable header area
+        let clickable_area = self.view.view(cx, ids!(clickable_header)).area();
+        match event.hits(cx, clickable_area) {
+            Hit::FingerUp(fue) if fue.is_over && fue.device.has_hovers() => {
+                // Calculate dropdown position based on header location
+                let rect = clickable_area.rect(cx);
+                let dropdown_pos = dvec2(rect.pos.x, rect.pos.y + rect.size.y + 4.0);
+                cx.action(RoomsListHeaderAction::ShowDropdown {
+                    pos: dropdown_pos,
+                    filter: self.filter_option,
+                    sort: self.sort_option,
+                });
+            }
+            Hit::FingerUp(fue) if fue.is_over => {
+                // Touch device - show dropdown below header
+                let rect = clickable_area.rect(cx);
+                let dropdown_pos = dvec2(rect.pos.x, rect.pos.y + rect.size.y + 4.0);
+                cx.action(RoomsListHeaderAction::ShowDropdown {
+                    pos: dropdown_pos,
+                    filter: self.filter_option,
+                    sort: self.sort_option,
+                });
+            }
+            _ => {}
         }
 
         self.view.handle_event(cx, event, scope);
@@ -154,4 +229,14 @@ pub enum RoomsListHeaderAction {
     SetSyncStatus(bool),
     /// An action received by the RoomsListHeader indicating the sync service state has changed.
     StateUpdate(State),
+    /// An action emitted when the header is clicked to show the dropdown.
+    ShowDropdown {
+        pos: DVec2,
+        filter: RoomFilterOption,
+        sort: RoomSortOption,
+    },
+    /// An action to set the current filter option.
+    SetFilter(RoomFilterOption),
+    /// An action to set the current sort option.
+    SetSort(RoomSortOption),
 }

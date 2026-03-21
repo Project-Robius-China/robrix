@@ -293,11 +293,11 @@ script_mod! {
                                         padding: 0,
                                         margin: 0
                                         left_button +: {
-                                            width: Fit, height: Fit,
-                                            padding: Inset{left: 20, right: 23, top: 10, bottom: 10}
+                                            width: 50, height: 50,
+                                            padding: Inset{left: 10, right: 10, top: 10, bottom: 10}
                                             margin: Inset{left: 8, right: 0, top: 0, bottom: 0}
-                                            draw_icon +: { color: (ROOM_NAME_TEXT_COLOR) }
-                                            icon_walk: Walk{width: 13, height: Fit}
+                                            draw_icon +: { color: #000 }
+                                            icon_walk: Walk{width: 24, height: 24}
                                             spacing: 0
                                             text: ""
                                         }

@@ -245,7 +245,8 @@ pub enum SpacesBarAction {
     /// The user primary-clicked/tapped a space entry in the SpacesBar.
     ButtonClicked { space_name_id: RoomNameId },
     /// The user secondary-clicked/long-pressed a space entry in the SpacesBar.
-    ButtonSecondaryClicked { space_name_id: RoomNameId },
+    /// Includes the position where the click occurred for context menu positioning.
+    ButtonSecondaryClicked { space_name_id: RoomNameId, pos: DVec2 },
     #[default]
     None,
 }
@@ -306,19 +307,19 @@ impl Widget for SpacesBarEntry {
                 if fe.device.mouse_button().is_some_and(|b| b.is_secondary()) {
                     if let Some(space_name_id) = self.space_name_id.clone() {
                         cx.widget_action(
-                            self.widget_uid(), 
-                            SpacesBarAction::ButtonSecondaryClicked { space_name_id },
+                            self.widget_uid(),
+                            SpacesBarAction::ButtonSecondaryClicked { space_name_id, pos: fe.abs },
                         );
                     }
                 }
             }
-            Hit::FingerLongPress(_lp) => {
+            Hit::FingerLongPress(lp) => {
                 self.animator_play(cx, ids!(hover.down));
                 emit_hover_in_action(self, cx);
                 if let Some(space_name_id) = self.space_name_id.clone() {
                     cx.widget_action(
-                        self.widget_uid(), 
-                        SpacesBarAction::ButtonSecondaryClicked { space_name_id },
+                        self.widget_uid(),
+                        SpacesBarAction::ButtonSecondaryClicked { space_name_id, pos: lp.abs },
                     );
                 }
             }

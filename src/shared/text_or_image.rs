@@ -5,9 +5,6 @@
 
 use makepad_widgets::{image_cache::ImageCacheImpl, *};
 use matrix_sdk::ruma::events::room::MediaSource;
-/// Maximum height for image thumbnails in the timeline (Issue #650)
-/// This prevents very tall images from dominating the view
-const IMAGE_THUMBNAIL_MAX_HEIGHT: f64 = 300.0;
 
 script_mod! {
     use mod.prelude.widgets.*

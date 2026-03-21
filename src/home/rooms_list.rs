@@ -26,11 +26,11 @@ use matrix_sdk::{RoomState, ruma::{events::tag::Tags, MilliSecondsSinceUnixEpoch
 use crate::{
     app::{AppState, SelectedRoom},
     home::{
-        navigation_tab_bar::{NavigationBarAction, SelectedTab}, room_context_menu::RoomContextMenuDetails, rooms_list_entry::RoomsListEntryAction, space_lobby::{SpaceLobbyAction, SpaceLobbyEntryWidgetExt}
+        navigation_tab_bar::{NavigationBarAction, SelectedTab}, room_context_menu::RoomContextMenuDetails, rooms_list_entry::RoomsListEntryAction, rooms_list_header::{RoomFilterOption, RoomSortOption}, rooms_list_header_dropdown::RoomsListHeaderDropdownAction, space_lobby::{SpaceLobbyAction, SpaceLobbyEntryWidgetExt}
     },
     room::{
         FetchedRoomAvatar,
-        room_display_filter::{RoomDisplayFilter, RoomDisplayFilterBuilder, RoomFilterCriteria, SortFn},
+        room_display_filter::{FilterableRoom, RoomDisplayFilter, RoomDisplayFilterBuilder, RoomFilterCriteria, SortFn},
     },
     shared::{
         collapsible_header::{CollapsibleHeaderAction, CollapsibleHeaderWidgetRefExt, HeaderCategory},
@@ -445,6 +445,12 @@ pub struct RoomsList {
     /// The currently-active sort function for the list of rooms.
     #[rust] sort_fn: Option<Box<SortFn>>,
 
+    /// The header filter option selected from the dropdown.
+    #[rust(RoomFilterOption::All)] header_filter_option: RoomFilterOption,
+
+    /// The header sort option selected from the dropdown.
+    #[rust(RoomSortOption::Activity)] header_sort_option: RoomSortOption,
+
     /// The list of invited rooms currently displayed in the UI.
     #[rust] displayed_invited_rooms: Vec<OwnedRoomId>,
     #[rust(false)] is_invited_rooms_header_expanded: bool,
@@ -502,9 +508,20 @@ macro_rules! should_display_room {
     ($self:expr, $room_id:expr, $room:expr) => {
         !$self.hidden_rooms.contains($room_id)
             && ($self.display_filter)($room)
+            && passes_header_filter($self.header_filter_option, $room)
             && $self.selected_space.as_ref()
                 .is_none_or(|space| $self.is_room_indirectly_in_space(space.room_id(), $room_id))
     };
+}
+
+/// Returns whether a room passes the given header filter option.
+fn passes_header_filter(filter: RoomFilterOption, room: &dyn FilterableRoom) -> bool {
+    match filter {
+        RoomFilterOption::All => true,
+        RoomFilterOption::Unread => room.unread_messages() > 0 || room.unread_mentions() > 0,
+        RoomFilterOption::Favorites => room.tags().contains_key(&TagName::Favorite),
+        RoomFilterOption::People => room.is_direct(),
+    }
 }
 
 
@@ -939,7 +956,27 @@ impl RoomsList {
                 .build()
         };
         self.display_filter = display_fn;
-        self.sort_fn = sort_fn;
+        // Only use keyword-based sort if provided, otherwise use header sort option
+        self.sort_fn = sort_fn.or_else(|| self.create_header_sort_fn());
+    }
+
+    /// Creates a sort function based on the header sort option.
+    fn create_header_sort_fn(&self) -> Option<Box<SortFn>> {
+        match self.header_sort_option {
+            RoomSortOption::Activity => None, // Default order from server
+            RoomSortOption::Alphabetical => Some(Box::new(|a: &dyn FilterableRoom, b: &dyn FilterableRoom| {
+                a.room_name().to_lowercase().cmp(&b.room_name().to_lowercase())
+            })),
+            RoomSortOption::Unread => Some(Box::new(|a: &dyn FilterableRoom, b: &dyn FilterableRoom| {
+                // Sort by unread count (descending), then by name
+                let a_unread = a.unread_messages() + a.unread_mentions();
+                let b_unread = b.unread_messages() + b.unread_mentions();
+                match b_unread.cmp(&a_unread) {
+                    std::cmp::Ordering::Equal => a.room_name().to_lowercase().cmp(&b.room_name().to_lowercase()),
+                    other => other,
+                }
+            })),
+        }
     }
 
     /// Updates and redraws the lists of displayed rooms in the RoomsList.
@@ -1327,6 +1364,20 @@ impl Widget for RoomsList {
             for action in actions {
                 if let RoomFilterAction::Changed(keywords) = action.as_widget_action().cast_ref() {
                     self.regenerate_display_filter_and_sort_fn(keywords);
+                    self.update_displayed_rooms(cx, true);
+                    continue;
+                }
+
+                // Handle filter/sort changes from the header dropdown.
+                if let Some(RoomsListHeaderDropdownAction::FilterChanged(filter)) = action.downcast_ref() {
+                    self.header_filter_option = *filter;
+                    self.regenerate_display_filter_and_sort_fn("");
+                    self.update_displayed_rooms(cx, true);
+                    continue;
+                }
+                if let Some(RoomsListHeaderDropdownAction::SortChanged(sort)) = action.downcast_ref() {
+                    self.header_sort_option = *sort;
+                    self.regenerate_display_filter_and_sort_fn("");
                     self.update_displayed_rooms(cx, true);
                     continue;
                 }

@@ -226,11 +226,31 @@ cargo packager --release ## --verbose is optional
 
 ### Platform-specific considerations
 Note that due to platform restrictions, you can currently only build:
-* Linux packages on a Linux OS machine
+* Linux packages (`.deb` and `.AppImage`) on a Linux OS machine
 * Windows installer executables on a Windows OS machine
 * macOS disk images / app bundles on a macOS machine
 * iOS apps on a macOS machine.
 * Android, on a machine with any OS!
+
+### Updating Robrix on Linux (AppImage)
+
+The Robrix AppImage includes embedded update information that enables automatic updates via [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate). This allows you to update Robrix with delta updates (only downloading changed portions of the binary).
+
+**To check the embedded update information:**
+```sh
+./Robrix-*.AppImage --appimage-updateinfo
+```
+
+**To update using AppImageUpdate:**
+```sh
+# Install AppImageUpdate (if not already installed)
+# Download from: https://github.com/AppImageCommunity/AppImageUpdate/releases
+
+# Check for and apply updates
+appimageupdatetool ./Robrix-*.AppImage
+```
+
+The update information uses the `gh-releases-zsync` transport, which automatically checks GitHub Releases for newer versions and downloads only the changed binary portions (delta updates).
 
 There are some additional considerations when packaging Robrix for macOS:
 

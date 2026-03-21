@@ -260,6 +260,16 @@ script_mod! {
                         align: Align{x: 0.5, y: 0.5}
                         text: "Sign up here"
                     }
+
+                    // Cancel button for add-account mode (hidden by default)
+                    cancel_button := RobrixIconButton {
+                        width: Fit, height: Fit
+                        padding: Inset{left: 15, right: 15, top: 10, bottom: 10}
+                        margin: Inset{top: 10, bottom: 5}
+                        align: Align{x: 0.5, y: 0.5}
+                        text: "Cancel"
+                        visible: false
+                    }
                 }
 
                 // The modal that pops up to display login status messages,
@@ -287,6 +297,8 @@ pub struct LoginScreen {
     #[rust] sso_pending: bool,
     /// The URL to redirect to after logging in with SSO.
     #[rust] sso_redirect_url: Option<String>,
+    /// Boolean to indicate if we're in "add account" mode (adding another Matrix account).
+    #[rust] adding_account: bool,
 }
 
 
@@ -305,12 +317,25 @@ impl MatchEvent for LoginScreen {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         let login_button = self.view.button(cx, ids!(login_button));
         let signup_button = self.view.button(cx, ids!(signup_button));
+        let cancel_button = self.view.button(cx, ids!(cancel_button));
         let user_id_input = self.view.text_input(cx, ids!(user_id_input));
         let password_input = self.view.text_input(cx, ids!(password_input));
         let homeserver_input = self.view.text_input(cx, ids!(homeserver_input));
 
         let login_status_modal = self.view.modal(cx, ids!(login_status_modal));
         let login_status_modal_inner = self.view.login_status_modal(cx, ids!(login_status_modal_inner));
+
+        // Handle cancel button for add-account mode
+        if cancel_button.clicked(actions) {
+            self.adding_account = false;
+            // Reset the UI back to normal login mode
+            self.view.label(cx, ids!(title)).set_text(cx, "Login to Robrix");
+            cancel_button.set_visible(cx, false);
+            self.view.view(cx, ids!(sso_view)).set_visible(cx, true);
+            signup_button.set_visible(cx, true);
+            cx.action(LoginAction::CancelAddAccount);
+            self.redraw(cx);
+        }
 
         if signup_button.clicked(actions) {
             log!("Opening URL \"{}\"", MATRIX_SIGN_UP_URL);
@@ -341,6 +366,7 @@ impl MatchEvent for LoginScreen {
                     user_id,
                     password,
                     homeserver: homeserver.is_empty().not().then_some(homeserver),
+                    is_add_account: self.adding_account,
                 })));
             }
             login_status_modal.open(cx);
@@ -389,9 +415,14 @@ impl MatchEvent for LoginScreen {
                 Some(LoginAction::LoginSuccess) => {
                     // The main `App` component handles showing the main screen
                     // and hiding the login screen & login status modal.
+                    self.adding_account = false;
                     user_id_input.set_text(cx, "");
                     password_input.set_text(cx, "");
                     homeserver_input.set_text(cx, "");
+                    // Reset title and buttons in case we were in add-account mode
+                    self.view.label(cx, ids!(title)).set_text(cx, "Login to Robrix");
+                    cancel_button.set_visible(cx, false);
+                    signup_button.set_visible(cx, true);
                     login_status_modal.close(cx);
                     self.redraw(cx);
                 }
@@ -418,6 +449,28 @@ impl MatchEvent for LoginScreen {
                 }
                 Some(LoginAction::SsoSetRedirectUrl(url)) => {
                     self.sso_redirect_url = Some(url.to_string());
+                }
+                Some(LoginAction::ShowAddAccountScreen) => {
+                    self.adding_account = true;
+                    // Update UI to "add account" mode
+                    self.view.label(cx, ids!(title)).set_text(cx, "Add Another Account");
+                    cancel_button.set_visible(cx, true);
+                    // Hide signup button in add-account mode (user already has an account)
+                    signup_button.set_visible(cx, false);
+                    self.redraw(cx);
+                }
+                Some(LoginAction::AddAccountSuccess) => {
+                    // Reset the login screen state
+                    self.adding_account = false;
+                    user_id_input.set_text(cx, "");
+                    password_input.set_text(cx, "");
+                    homeserver_input.set_text(cx, "");
+                    // Reset title and buttons
+                    self.view.label(cx, ids!(title)).set_text(cx, "Login to Robrix");
+                    cancel_button.set_visible(cx, false);
+                    signup_button.set_visible(cx, true);
+                    login_status_modal.close(cx);
+                    self.redraw(cx);
                 }
                 _ => { }
             }
@@ -453,6 +506,9 @@ impl MatchEvent for LoginScreen {
 pub enum LoginAction {
     /// A positive response from the backend Matrix task to the login screen.
     LoginSuccess,
+    /// A positive response when adding an additional account (multi-account mode).
+    /// The login was successful but we should add this as a new account, not replace the existing one.
+    AddAccountSuccess,
     /// A negative response from the backend Matrix task to the login screen.
     LoginFailure(String),
     /// A login-related status message to display to the user.
@@ -470,15 +526,20 @@ pub enum LoginAction {
     /// informing it that the SSO login process is either still in flight (`true`) or has finished (`false`).
     ///
     /// Note that an inner value of `false` does *not* imply that the login request has
-    /// successfully finished. 
+    /// successfully finished.
     /// The login screen can use this to prevent the user from submitting
-    /// additional SSO login requests while a previous request is in flight. 
+    /// additional SSO login requests while a previous request is in flight.
     SsoPending(bool),
     /// Set the SSO redirect URL in the LoginScreen.
     ///
     /// When an SSO-based login is pendng, pressing the cancel button will send
     /// an HTTP request to this SSO server URL to gracefully shut it down.
     SsoSetRedirectUrl(Url),
+    /// Request to show the login screen in "add account" mode.
+    /// This is used when the user wants to add another Matrix account.
+    ShowAddAccountScreen,
+    /// Request to cancel adding an account and return to the previous screen.
+    CancelAddAccount,
     #[default]
     None,
 }

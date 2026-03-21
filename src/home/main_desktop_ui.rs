@@ -3,7 +3,7 @@ use ruma::OwnedRoomId;
 use tokio::sync::Notify;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{app::{AppState, AppStateAction, SavedDockState, SelectedRoom}, home::{navigation_tab_bar::{NavigationBarAction, SelectedTab}, rooms_list::RoomsListRef, space_lobby::SpaceLobbyScreenWidgetRefExt}, utils::RoomNameId};
+use crate::{app::{AppState, AppStateAction, SavedDockState, SelectedRoom}, home::{navigation_tab_bar::{NavigationBarAction, SelectedTab}, rooms_list::RoomsListRef, space_lobby::SpaceLobbyScreenWidgetRefExt}, shared::no_longer_member_view::NoLongerMemberReason, utils::RoomNameId};
 use super::{invite_screen::InviteScreenWidgetRefExt, room_screen::RoomScreenWidgetRefExt, rooms_list::RoomsListAction};
 
 script_mod! {
@@ -504,9 +504,33 @@ impl WidgetMatchEvent for MainDesktopUI {
                     self.replace_invite_with_joined_room(cx, scope, room_name_id);
                 }
                 RoomsListAction::OpenRoomContextMenu { .. } => {}
-                RoomsListAction::RoomRemoved { room_id, new_state: _ } => {
-                    // TODO: Show NoLongerMemberView for the room if it's currently displayed
-                    log!("Room {room_id} was removed from the rooms list");
+                RoomsListAction::RoomRemoved { room_id, new_state } => {
+                    // Show the NoLongerMemberView for any open RoomScreen displaying this room.
+                    log!("Room {room_id} was removed from the rooms list with state {new_state:?}");
+                    let reason = NoLongerMemberReason::from_room_state(*new_state)
+                        .unwrap_or(NoLongerMemberReason::Left);
+
+                    // Find any open tabs displaying this room and show the no longer member view.
+                    let dock = self.view.dock(cx, ids!(dock));
+                    if let Some(mut dock_inner) = dock.borrow_mut() {
+                        for (tab_live_id, (_, widget)) in dock_inner.items().iter() {
+                            // Check if this is a RoomScreen tab for the removed room
+                            if let Some(selected_room) = self.open_rooms.get(tab_live_id) {
+                                let matches = match selected_room {
+                                    SelectedRoom::JoinedRoom { room_name_id } => {
+                                        room_name_id.room_id() == room_id
+                                    }
+                                    SelectedRoom::Thread { room_name_id, .. } => {
+                                        room_name_id.room_id() == room_id
+                                    }
+                                    _ => false,
+                                };
+                                if matches {
+                                    widget.as_room_screen().show_no_longer_member(cx, reason.clone());
+                                }
+                            }
+                        }
+                    }
                 }
                 RoomsListAction::None => { }
             }

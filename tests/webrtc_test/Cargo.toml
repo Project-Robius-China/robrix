@@ -1,0 +1,9 @@
+[package]
+name = "webrtc_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "time", "sync"] }
+webrtc = "0.11"
+serde_json = "1.0"

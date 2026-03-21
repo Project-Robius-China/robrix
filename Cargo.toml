@@ -14,11 +14,11 @@ version = "0.0.1-pre-alpha-4"
 metadata.makepad-auto-version = "zqpv-Yj-K7WNVK2I8h5Okhho46Q="
 
 [dependencies]
-makepad-widgets = { git = "https://github.com/makepad/makepad", branch = "dev", features = ["serde"] }
-makepad-code-editor = { git = "https://github.com/makepad/makepad", branch = "dev" }
+# makepad-widgets = { git = "https://github.com/makepad/makepad", branch = "dev", features = ["serde"] }
+# makepad-code-editor = { git = "https://github.com/makepad/makepad", branch = "dev" }
 
-# makepad-widgets = { path = "../makepad/widgets", features = ["serde"] }
-# makepad-code-editor = { path = "../makepad/code_editor" }
+makepad-widgets = { path = "makepad/widgets", features = ["serde"] }
+makepad-code-editor = { path = "makepad/code_editor" }
 
 
 
@@ -76,8 +76,17 @@ serde_json = "1.0"
 thiserror = "2.0.16"
 tokio = { version = "1.43.1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = "0.3.17"
+
+# WebRTC and call support
+webrtc = "0.11"
+livekit-api = { git = "https://github.com/livekit/rust-sdks" }
 unicode-segmentation = "1.11.0"
 url = "2.5.0"
+
+# File dialog and image processing for attachments
+rfd = { version = "0.15.3", features = ["xdg-portal"] }
+mime_guess = "2.0.5"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 
 ## Dependencies for TSP support.
@@ -103,6 +112,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "http2",
     "macos-system-configuration",
 ] }
+mime = "0.3.17"
 
 
 [features]
@@ -251,12 +261,18 @@ depends = "./dist/depends_deb.txt"
 desktop_template = "./packaging/robrix.desktop"
 section = "utils"
 
+## Configuration for `cargo packager`'s generation of a Linux AppImage.
+## The update_information uses the gh-releases-zsync transport for automatic updates via AppImageUpdate.
+## Format: gh-releases-zsync|owner|repo|latest|zsync-file-pattern
+[package.metadata.packager.appimage]
+libs = []
+
 [package.metadata.packager.macos]
 minimum_system_version = "11.0"
 frameworks = []
 info_plist_path = "./packaging/Info.plist"
 entitlements = "./packaging/Entitlements.plist"
-signing_identity = "Developer ID Application: GOSIM FOUNDATION LTD. (HMX6XGJZ3R)"
+# signing_identity = "Developer ID Application: GOSIM FOUNDATION LTD. (HMX6XGJZ3R)"
 
 
 ## Configuration for `cargo packager`'s generation of a macOS `.dmg`.

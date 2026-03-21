@@ -468,10 +468,10 @@ impl WidgetMatchEvent for NewMessageContextMenu {
         // }
         else if self.button(cx, ids!(delete_button)).clicked(actions) {
             cx.widget_action(
-                details.room_screen_widget_uid, 
+                details.room_screen_widget_uid,
                 MessageAction::Redact {
                     details: details.clone(),
-                    // TODO: show a Modal to confirm deletion, and get the reason.
+                    // The confirmation modal is shown by the room_screen's MessageAction::Redact handler.
                     reason: None,
                 },
             );

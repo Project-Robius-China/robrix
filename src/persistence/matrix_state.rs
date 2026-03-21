@@ -228,14 +228,14 @@ pub async fn save_session(
 }
 
 /// Remove the LATEST_USER_ID_FILE_NAME file if it exists
-/// 
+///
 /// Returns:
 /// - Ok(true) if file was found and deleted
 /// - Ok(false) if file didn't exist
 /// - Err if deletion failed
 pub async fn delete_latest_user_id() -> anyhow::Result<bool> {
     let last_login_path = app_data_dir().join(LATEST_USER_ID_FILE_NAME);
-    
+
     if last_login_path.exists() {
         tokio::fs::remove_file(&last_login_path).await
             .map_err(|e| anyhow::anyhow!("Failed to remove latest user file: {e}"))
@@ -243,4 +243,77 @@ pub async fn delete_latest_user_id() -> anyhow::Result<bool> {
     } else {
         Ok(false)
     }
+}
+
+/// Converts a file name back to a user ID.
+///
+/// This is the inverse of `user_id_to_file_name`.
+fn file_name_to_user_id(file_name: &str) -> Option<OwnedUserId> {
+    // Convert "username_homeserver.com" back to "@username:homeserver.com"
+    let parts: Vec<&str> = file_name.splitn(2, '_').collect();
+    if parts.len() == 2 {
+        let user_id_str = format!("@{}:{}", parts[0], parts[1]);
+        user_id_str.try_into().ok()
+    } else {
+        None
+    }
+}
+
+/// Lists all saved user accounts that have valid session files.
+///
+/// This scans the app data directory for user directories and checks
+/// if they contain valid session files.
+///
+/// Returns a vector of user IDs for all accounts with saved sessions.
+pub async fn list_saved_accounts() -> Vec<OwnedUserId> {
+    let app_dir = app_data_dir();
+    let mut accounts = Vec::new();
+
+    let Ok(mut entries) = tokio::fs::read_dir(app_dir).await else {
+        return accounts;
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        // Skip non-directories
+        let Ok(file_type) = entry.file_type().await else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let dir_name = entry.file_name();
+        let dir_name_str = dir_name.to_string_lossy();
+
+        // Skip special directories
+        if dir_name_str.starts_with("db_") || dir_name_str == "logs" {
+            continue;
+        }
+
+        // Try to convert directory name to user ID
+        if let Some(user_id) = file_name_to_user_id(&dir_name_str) {
+            // Check if session file exists
+            let session_path = session_file_path(&user_id);
+            if session_path.exists() {
+                accounts.push(user_id);
+            }
+        }
+    }
+
+    accounts
+}
+
+/// Loads the session data for a specific user without restoring the client.
+///
+/// This is useful for displaying account information in the account switcher
+/// without fully initializing the Matrix client.
+pub async fn load_session_data(user_id: &UserId) -> anyhow::Result<FullSessionPersisted> {
+    let session_file = session_file_path(user_id);
+    if !session_file.exists() {
+        bail!("Session file does not exist for user {user_id}");
+    }
+
+    let serialized_session = tokio::fs::read_to_string(session_file).await?;
+    let session: FullSessionPersisted = serde_json::from_str(&serialized_session)?;
+    Ok(session)
 }

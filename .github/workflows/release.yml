@@ -272,9 +272,12 @@ jobs:
         env:
           CARGO_PACKAGER_SIGNING_KEY: ${{ secrets.CARGO_PACKAGER_SIGNING_KEY }}
           CARGO_PACKAGER_SIGNING_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGNING_PASSWORD }}
+          # AppImage update information for automatic updates via AppImageUpdate
+          # Format: gh-releases-zsync|owner|repo|latest|zsync-file-pattern
+          UPDATE_INFORMATION: "gh-releases-zsync|project-robius|robrix|latest|Robrix-*-${{ matrix.arch }}.AppImage.zsync"
         with:
           github_token: ${{ secrets.ROBRIX_RELEASE }}
-          packager_formats: deb
+          packager_formats: deb,appimage
           releaseId: ${{ needs.create_release.outputs.release_id }}
 
   for_macos:

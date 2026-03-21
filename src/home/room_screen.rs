@@ -32,14 +32,16 @@ use crate::{
     },
     room::{BasicRoomDetails, room_input_bar::{RoomInputBarState, RoomInputBarWidgetRefExt}, typing_notice::TypingNoticeWidgetExt},
     shared::{
-        avatar::{AvatarState, AvatarWidgetRefExt}, confirmation_modal::ConfirmationModalContent, html_or_plaintext::{HtmlOrPlaintextRef, HtmlOrPlaintextWidgetRefExt, RobrixHtmlLinkAction}, image_viewer::{ImageViewerAction, ImageViewerMetaData, LoadState}, jump_to_bottom_button::{JumpToBottomButtonWidgetExt, UnreadMessageCount}, popup_list::{PopupKind, enqueue_popup_notification}, restore_status_view::RestoreStatusViewWidgetExt, styles::*, text_or_image::{TextOrImageAction, TextOrImageRef, TextOrImageWidgetRefExt}, timestamp::TimestampWidgetRefExt
+        avatar::{AvatarState, AvatarWidgetRefExt}, confirmation_modal::ConfirmationModalContent, html_or_plaintext::{HtmlOrPlaintextRef, HtmlOrPlaintextWidgetRefExt, RobrixHtmlLinkAction}, image_viewer::{ImageViewerAction, ImageViewerMetaData, LoadState}, jump_to_bottom_button::{JumpToBottomButtonWidgetExt, UnreadMessageCount}, no_longer_member_view::{NoLongerMemberReason, NoLongerMemberViewWidgetExt}, popup_list::{PopupKind, enqueue_popup_notification}, restore_status_view::RestoreStatusViewWidgetExt, styles::*, text_or_image::{TextOrImageAction, TextOrImageRef, TextOrImageWidgetRefExt}, timestamp::TimestampWidgetRefExt
     },
     sliding_sync::{BackwardsPaginateUntilEventRequest, MatrixRequest, PaginationDirection, TimelineEndpoints, TimelineKind, TimelineRequestSender, UserPowerLevels, get_client, submit_async_request, take_timeline_endpoints}, utils::{self, ImageFormat, MEDIA_THUMBNAIL_FORMAT, RoomNameId, unix_time_millis_to_datetime}
 };
+use crate::call::call_preview_modal::CallPreviewModalWidgetExt;
 use crate::home::event_reaction_list::ReactionListWidgetRefExt;
 use crate::home::room_read_receipt::AvatarRowWidgetRefExt;
 use crate::room::room_input_bar::RoomInputBarWidgetExt;
 use crate::shared::mentionable_text_input::MentionableTextInputAction;
+// TODO: Re-enable when upload progress UI is implemented
 
 use rangemap::RangeSet;
 
@@ -466,6 +468,95 @@ script_mod! {
         }
     }
 
+    // The view used for call notification events (RtcNotification, CallInvite)
+    mod.widgets.CallNotificationEvent = View {
+        width: Fill,
+        height: Fit,
+        flow: Right,
+        margin: Inset{ top: 6.0, bottom: 6.0}
+        padding: Inset{ top: 4.0, bottom: 4.0, left: 7.0, right: 10.0 }
+        spacing: 8.0
+        cursor: MouseCursor.Default
+        show_bg: true
+        draw_bg +: {
+            color: #f8f0ff  // Light purple background
+        }
+
+        body := View {
+            width: Fill,
+            height: Fit
+            flow: Right,
+            align: Align{x: 0.0, y: 0.5}
+            spacing: 8.0
+
+            left_container := View {
+                align: Align{x: 0.5, y: 0.5}
+                width: 70.0,
+                height: Fit
+
+                timestamp := Timestamp {
+                    margin: Inset{top: 0}
+                }
+            }
+
+            call_icon := Icon {
+                width: 20,
+                height: 20,
+                margin: Inset{right: 4}
+                draw_icon +: {
+                    svg: (ICON_VOICE_CALL)
+                    color: #7b1fa2  // Purple color
+                }
+            }
+
+            avatar := Avatar {
+                width: 24.,
+                height: 24.,
+                margin: 0
+
+                text_view +: {
+                    text +: {
+                        draw_text +: {
+                            text_style: TITLE_TEXT { font_size: 8.0 }
+                        }
+                    }
+                }
+            }
+
+            content := Label {
+                width: Fit,
+                height: Fit
+                margin: Inset{top: 0}
+                padding: 0
+                draw_text +: {
+                    text_style: SMALL_STATE_TEXT_STYLE { font_size: 11 },
+                    color: #333333
+                }
+                text: "started a call"
+            }
+
+            View {
+                width: Fill
+                height: Fit
+            }
+
+            join_call_button := RobrixIconButton {
+                width: Fit,
+                height: Fit
+                padding: Inset{top: 6, bottom: 6, left: 12, right: 12}
+                draw_bg +: {
+                    color: #7b1fa2  // Purple
+                    border_radius: 15.0
+                }
+                draw_icon.svg: (ICON_VOICE_CALL)
+                draw_icon.color: #ffffff
+                draw_text.color: #ffffff
+                draw_text.text_style: SMALL_STATE_TEXT_STYLE {}
+                icon_walk: Walk{width: 14, height: Fit, margin: Inset{right: 4}}
+                text: "Join"
+            }
+        }
+    }
 
     // The view used for each day divider in a room's timeline.
     // The date text is centered between two horizontal lines.
@@ -554,6 +645,7 @@ script_mod! {
             ImageMessage := mod.widgets.ImageMessage {}
             CondensedImageMessage := mod.widgets.CondensedImageMessage {}
             SmallStateEvent := mod.widgets.SmallStateEvent {}
+            CallNotificationEvent := mod.widgets.CallNotificationEvent {}
             SmallStateGroupHeader := mod.prelude.widgets.FoldHeader {
                 header: View{
                     width: Fill,
@@ -622,6 +714,7 @@ script_mod! {
                         SmallStateEvent := mod.widgets.SmallStateEvent {}
                         CondensedMessage := mod.widgets.CondensedMessage {}
                         Message := mod.widgets.Message {}
+                        Empty := mod.widgets.Empty {}
                     }
                 }
             }
@@ -659,6 +752,9 @@ script_mod! {
             keyboard_view := KeyboardView {
                 width: Fill, height: Fill,
                 flow: Down,
+                // Set to 0 because Android's ResizingLayout already handles keyboard insets
+                // via bottom padding, so KeyboardView's scroll shift would double-adjust.
+                keyboard_min_shift: 0.0,
 
                 // First, display the timeline of all messages/events.
                 timeline := mod.widgets.Timeline {
@@ -679,12 +775,30 @@ script_mod! {
             // The top space should be displayed as an overlay at the top of the timeline.
             top_space := mod.widgets.TopSpace { }
 
-            // Floating members button at the top right
-            members_button_container := View {
+            // Floating buttons at the top right (call button and members button)
+            top_right_buttons := View {
                 width: Fill,
                 height: Fit,
                 align: Align{x: 1.0, y: 0.0},
                 padding: Inset{top: 10, right: 10},
+                flow: Right,
+                spacing: 8,
+
+                call_button := RobrixNeutralIconButton {
+                    width: Fit,
+                    height: Fit,
+                    padding: Inset{top: 8, bottom: 8, left: 10, right: 10},
+                    spacing: 4,
+                    draw_bg +: {
+                        color: (COLOR_PRIMARY),
+                        border_color: (COLOR_DIVIDER_DARK),
+                        border_size: 1.0,
+                        border_radius: 4.0,
+                    }
+                    draw_icon.svg: (ICON_VOICE_CALL)
+                    icon_walk: Walk{width: 14, height: 14}
+                    text: ""
+                }
 
                 members_button := RobrixNeutralIconButton {
                     width: Fit,
@@ -713,6 +827,17 @@ script_mod! {
             // The loading pane appears while the user is waiting for something in the room screen
             // to finish loading, e.g., when loading an older replied-to message.
             loading_pane := LoadingPane { }
+
+            // The view shown when the user is no longer a member of this room
+            // (e.g., left, kicked, or banned).
+            no_longer_member_view := NoLongerMemberView { }
+
+            // Call preview modal - shown before joining a call (inside room screen)
+            call_preview_modal := Modal {
+                content +: {
+                    call_preview_modal_inner := CallPreviewModal {}
+                }
+            }
 
 
             /*
@@ -754,6 +879,9 @@ pub struct RoomScreen {
     #[rust] is_loaded: bool,
     /// Whether or not all rooms have been loaded (received from the homeserver).
     #[rust] all_rooms_loaded: bool,
+    /// Whether the user clicked the members button while members were being fetched.
+    /// When true, the members panel will be shown automatically when members arrive.
+    #[rust] pending_show_members_panel: bool,
 }
 
 impl Drop for RoomScreen {
@@ -899,14 +1027,55 @@ impl Widget for RoomScreen {
                         cx.action(InviteAction::ShowInviteConfirmationModal(RefCell::new(Some(content))));
                     }
                 }
+
+                // Handle the join_call_button (in a CallNotificationEvent) being clicked.
+                if wr.button(cx, ids!(join_call_button)).clicked(actions) {
+                    if let Some(tl) = self.tl_state.as_ref() {
+                        let room_id = tl.kind.room_id().clone();
+                        log!("Joining call in room {}", room_id);
+                        // Get the user's display name for the call screen
+                        let user_display_name = crate::sliding_sync::current_user_id()
+                            .map(|uid| uid.localpart().to_string());
+                        // Show the call screen immediately
+                        cx.action(crate::call::call_state::CallAction::ShowCallScreen {
+                            room_id: room_id.clone(),
+                            user_display_name,
+                        });
+                        // Submit the join call request
+                        submit_async_request(MatrixRequest::JoinCall { room_id });
+                    }
+                }
             }
 
             self.handle_message_actions(cx, actions, &portal_list, &loading_pane);
 
+            // Handle the call button click to open the call preview modal
+            if self.button(cx, ids!(call_button)).clicked(actions) {
+                if let Some(tl) = self.tl_state.as_ref() {
+                    let room_id = tl.kind.room_id().clone();
+                    log!("Opening call preview modal for room {}", room_id);
+                    // Get the user's display name for the avatar
+                    let user_display_name = crate::sliding_sync::current_user_id()
+                        .map(|uid| uid.localpart().to_string());
+                    // Open the local call preview modal
+                    self.call_preview_modal(cx, ids!(call_preview_modal_inner))
+                        .show(cx, room_id, user_display_name);
+                    self.modal(cx, ids!(call_preview_modal)).open(cx);
+                }
+            }
+
+            // Handle call preview modal actions (JoinCall or Close)
+            let call_preview_modal = self.call_preview_modal(cx, ids!(call_preview_modal_inner));
+            if call_preview_modal.joined(actions).is_some() || call_preview_modal.closed(actions) {
+                self.modal(cx, ids!(call_preview_modal)).close(cx);
+            }
+
             // Handle the members button click to show the members panel
             if self.button(cx, ids!(members_button)).clicked(actions) {
+                log!("Members button clicked");
                 if let Some(tl) = self.tl_state.as_ref() {
                     if let Some(room_members) = tl.room_members.as_ref() {
+                        log!("Members already available: {} members", room_members.len());
                         let room_id = tl.kind.room_id().clone();
                         let room_name = self.room_name_id.as_ref()
                             .map(|rni| rni.display_name().to_string())
@@ -917,7 +1086,19 @@ impl Widget for RoomScreen {
                             room_id,
                             room_name,
                         );
+                    } else {
+                        // Members not yet available, trigger a fetch from local cache first
+                        // (faster than server fetch), and mark that we want to show the panel when they arrive
+                        log!("Members not available, fetching...");
+                        self.pending_show_members_panel = true;
+                        submit_async_request(MatrixRequest::GetRoomMembers {
+                            timeline_kind: tl.kind.clone(),
+                            memberships: matrix_sdk::RoomMemberships::JOIN,
+                            local_only: true, // Try local cache first for faster response
+                        });
                     }
+                } else {
+                    log!("Members button clicked but no tl_state");
                 }
             }
 
@@ -954,6 +1135,22 @@ impl Widget for RoomScreen {
                             None,
                         );
                     }
+                }
+
+                // Handle the NoLongerMemberView actions.
+                let no_longer_member_view = self.no_longer_member_view(cx, ids!(no_longer_member_view));
+                if no_longer_member_view.rejoin_clicked(actions) {
+                    // Attempt to rejoin the room.
+                    if let Some(room_id) = self.room_id().cloned() {
+                        log!("User requested to rejoin room {room_id}");
+                        submit_async_request(MatrixRequest::JoinRoom { room_id });
+                        // Hide the view while the rejoin is in progress.
+                        self.hide_no_longer_member(cx);
+                    }
+                }
+                if no_longer_member_view.close_clicked(actions) {
+                    // Just hide the view.
+                    self.hide_no_longer_member(cx);
                 }
 
                 // Handle the highlight animation for a message.
@@ -1021,6 +1218,36 @@ impl Widget for RoomScreen {
 
             self.process_timeline_updates(cx, &portal_list);
 
+            // If the user clicked the members button while members were loading,
+            // and members are now available, show the members panel.
+            if self.pending_show_members_panel {
+                if let Some(tl) = self.tl_state.as_ref() {
+                    if let Some(room_members) = tl.room_members.as_ref() {
+                        if !room_members.is_empty() {
+                            // Members are available and non-empty, show the panel
+                            self.pending_show_members_panel = false;
+                            let room_id = tl.kind.room_id().clone();
+                            let room_name = self.room_name_id.as_ref()
+                                .map(|rni| rni.display_name().to_string())
+                                .unwrap_or_default();
+                            members_panel.show_with_members(
+                                cx,
+                                room_members.clone(),
+                                room_id,
+                                room_name,
+                            );
+                        } else {
+                            // Local cache returned empty, try fetching from server
+                            submit_async_request(MatrixRequest::GetRoomMembers {
+                                timeline_kind: tl.kind.clone(),
+                                memberships: matrix_sdk::RoomMemberships::JOIN,
+                                local_only: false, // Fetch from server
+                            });
+                        }
+                    }
+                }
+            }
+
             // Ideally we would do this elsewhere on the main thread, because it's not room-specific,
             // but it doesn't hurt to do it here.
             // TODO: move this up a layer to something higher in the UI tree,
@@ -1080,6 +1307,7 @@ impl Widget for RoomScreen {
                     timeline_kind: tl.kind.clone(),
                     room_members,
                     room_avatar_url,
+                    timeline_update_sender: Some(tl.update_sender.clone()),
                 }
             } else if let Some(room_name) = &self.room_name_id {
                 // Fallback case: we have a room_name but no tl_state yet
@@ -1090,6 +1318,7 @@ impl Widget for RoomScreen {
                         .expect("BUG: room_name_id was set but timeline_kind was missing"),
                     room_members: None,
                     room_avatar_url: None,
+                    timeline_update_sender: None,
                 }
             } else {
                 // No room selected yet, skip event handling that requires room context
@@ -1105,6 +1334,7 @@ impl Widget for RoomScreen {
                     timeline_kind: TimelineKind::MainRoom { room_id },
                     room_members: None,
                     room_avatar_url: None,
+                    timeline_update_sender: None,
                 }
             };
             let mut room_scope = Scope::with_props(&room_props);
@@ -1379,6 +1609,16 @@ impl Widget for RoomScreen {
                                 other,
                                 item_drawn_status,
                             ),
+                            TimelineItemContent::RtcNotification | TimelineItemContent::CallInvite => {
+                                populate_call_notification_event(
+                                    cx,
+                                    list,
+                                    item_id,
+                                    &tl_state.kind,
+                                    event_tl_item,
+                                    item_drawn_status,
+                                )
+                            },
                             unhandled => {
                                 let item = list.item(cx, item_id, id!(SmallStateEvent));
                                 item.label(cx, ids!(content)).set_text(cx, &format!("[Unsupported] {:?}", unhandled));
@@ -1582,6 +1822,28 @@ impl RoomScreen {
                         tl.profile_drawn_since_last_update.remove(changed_indices.clone());
                         // log!("process_timeline_updates(): changed_indices: {changed_indices:?}, items len: {}\ncontent drawn: {:#?}\nprofile drawn: {:#?}", items.len(), tl.content_drawn_since_last_update, tl.profile_drawn_since_last_update);
                     }
+                    // Check if any changed items contain membership changes.
+                    // If so, we need to refresh the member list to update the member count.
+                    let check_range = changed_indices.start..changed_indices.end.min(new_items.len());
+                    let has_membership_change = new_items.iter()
+                        .skip(check_range.start)
+                        .take(check_range.len())
+                        .any(|item| {
+                            if let TimelineItemKind::Event(event_item) = item.kind() {
+                                matches!(event_item.content(), TimelineItemContent::MembershipChange(_))
+                            } else {
+                                false
+                            }
+                        });
+                    if has_membership_change {
+                        // Trigger a member list refresh
+                        submit_async_request(MatrixRequest::GetRoomMembers {
+                            timeline_kind: tl.kind.clone(),
+                            memberships: matrix_sdk::RoomMemberships::JOIN,
+                            local_only: false, // Fetch fresh from server
+                        });
+                    }
+
                     tl.items = new_items;
                     let small_state_events = extract_small_state_events(tl.items.iter().cloned());
                     tl.small_state_group_manager.compute_group_state(small_state_events);
@@ -1713,10 +1975,21 @@ impl RoomScreen {
                     // log!("process_timeline_updates(): room members fetched for room {}", tl.kind.room_id());
                     // Here, to be most efficient, we could redraw only the user avatars and names in the timeline,
                     // but for now we just fall through and let the final `redraw()` call re-draw the whole timeline view.
+
+                    // Now that members are synced from the server, fetch the member list
+                    // so it's available when the user clicks the members button.
+                    submit_async_request(MatrixRequest::GetRoomMembers {
+                        timeline_kind: tl.kind.clone(),
+                        memberships: matrix_sdk::RoomMemberships::JOIN,
+                        local_only: true, // Members are now in local cache after sync
+                    });
                 }
                 TimelineUpdate::RoomMembersListFetched { members } => {
                     // Store room members directly in TimelineUiState
-                    tl.room_members = Some(Arc::new(members));
+                    // Only update if we got members, or if we don't have any yet
+                    if !members.is_empty() || tl.room_members.is_none() {
+                        tl.room_members = Some(Arc::new(members));
+                    }
                 },
                 TimelineUpdate::MediaFetched(request) => {
                     log!("process_timeline_updates(): media fetched for room {}", tl.kind.room_id());
@@ -1791,6 +2064,62 @@ impl RoomScreen {
                     tl.tombstone_info = Some(successor_room_details);
                 }
                 TimelineUpdate::LinkPreviewFetched => {}
+                TimelineUpdate::FileUploadConfirmed(file_data) => {
+                    // Read the file data from the path
+                    let file_path = &file_data.metadata.file_path;
+                    match std::fs::read(file_path) {
+                        Ok(data) => {
+                            let file_name = file_path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("attachment")
+                                .to_string();
+                            let mime_type = file_data.metadata.mime.to_string();
+                            let room_id = tl.kind.room_id().clone();
+
+                            log!("Sending attachment {} ({}, {} bytes) to room {}",
+                                file_name, mime_type, data.len(), room_id);
+
+                            // Submit the attachment upload request with progress tracking
+                            submit_async_request(MatrixRequest::SendAttachment {
+                                room_id,
+                                file_name: file_name.clone(),
+                                mime_type,
+                                data,
+                                timeline_update_sender: Some(tl.update_sender.clone()),
+                            });
+
+                            crate::shared::popup_list::enqueue_popup_notification(
+                                format!("Uploading: {}", file_name),
+                                crate::shared::popup_list::PopupKind::Info,
+                                Some(3.0),
+                            );
+                        }
+                        Err(e) => {
+                            error!("Failed to read file for upload: {:?}", e);
+                            crate::shared::popup_list::enqueue_popup_notification(
+                                format!("Failed to read file: {}", e),
+                                crate::shared::popup_list::PopupKind::Error,
+                                None,
+                            );
+                        }
+                    }
+                }
+                TimelineUpdate::FileUploadProgress { current, total } => {
+                    self.view.room_input_bar(cx, ids!(room_input_bar))
+                        .set_upload_progress(cx, current, total);
+                }
+                TimelineUpdate::FileUploadError(error) => {
+                    log!("File upload error: {}", error);
+                    crate::shared::popup_list::enqueue_popup_notification(
+                        format!("Upload failed: {}", error),
+                        crate::shared::popup_list::PopupKind::Error,
+                        None,
+                    );
+                }
+                TimelineUpdate::FileUploadAbortHandle(handle) => {
+                    self.view.room_input_bar(cx, ids!(room_input_bar))
+                        .set_upload_abort_handle(cx, handle);
+                }
             }
         }
 
@@ -2473,6 +2802,7 @@ impl RoomScreen {
                 content_drawn_since_last_update: RangeSet::new(),
                 profile_drawn_since_last_update: RangeSet::new(),
                 update_receiver,
+                update_sender: update_sender.clone(),
                 request_sender,
                 media_cache: MediaCache::new(Some(update_sender.clone())),
                 link_preview_cache: LinkPreviewCache::new(Some(update_sender)),
@@ -2610,6 +2940,20 @@ impl RoomScreen {
             timeline_kind,
             subscribe: false,
         });
+    }
+
+    /// Shows the "no longer member" view with the given reason.
+    ///
+    /// This should be called when the user has left, been kicked, or banned from this room.
+    fn show_no_longer_member(&mut self, cx: &mut Cx, reason: NoLongerMemberReason) {
+        let no_longer_member_view = self.no_longer_member_view(cx, ids!(no_longer_member_view));
+        no_longer_member_view.show(cx, reason);
+    }
+
+    /// Hides the "no longer member" view.
+    fn hide_no_longer_member(&mut self, cx: &mut Cx) {
+        let no_longer_member_view = self.no_longer_member_view(cx, ids!(no_longer_member_view));
+        no_longer_member_view.hide(cx);
     }
 
     /// Removes the current room's visual UI state from this widget
@@ -2827,6 +3171,25 @@ impl RoomScreenRef {
         let Some(mut inner) = self.borrow_mut() else { return };
         inner.set_displayed_room(cx, room_name_id, thread_root_event_id);
     }
+
+    /// Shows the "no longer member" view with the given reason.
+    ///
+    /// This should be called when the user has left, been kicked, or banned from this room.
+    pub fn show_no_longer_member(&self, cx: &mut Cx, reason: NoLongerMemberReason) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        inner.show_no_longer_member(cx, reason);
+    }
+
+    /// Hides the "no longer member" view.
+    pub fn hide_no_longer_member(&self, cx: &mut Cx) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        inner.hide_no_longer_member(cx);
+    }
+
+    /// Returns the room ID of the currently displayed room, if any.
+    pub fn room_id(&self) -> Option<OwnedRoomId> {
+        self.borrow().and_then(|inner| inner.room_id().cloned())
+    }
 }
 
 /// Immutable RoomScreen states passed via Scope props
@@ -2837,6 +3200,10 @@ pub struct RoomScreenProps {
     pub timeline_kind: TimelineKind,
     pub room_members: Option<Arc<Vec<RoomMember>>>,
     pub room_avatar_url: Option<OwnedMxcUri>,
+    /// The sender for timeline updates, used for operations like file uploads
+    /// that need to notify this specific timeline.
+    /// This is `None` in fallback cases where the timeline state isn't fully loaded yet.
+    pub timeline_update_sender: Option<crossbeam_channel::Sender<TimelineUpdate>>,
 }
 
 
@@ -2977,6 +3344,17 @@ pub enum TimelineUpdate {
     Tombstoned(SuccessorRoomDetails),
     /// A notice that link preview data for a URL has been fetched and is now available.
     LinkPreviewFetched,
+    /// A file upload has been confirmed by the user through the file preview modal.
+    FileUploadConfirmed(crate::shared::file_upload_modal::FileData),
+    /// Progress update for an ongoing file upload.
+    FileUploadProgress {
+        current: u64,
+        total: u64,
+    },
+    /// An error occurred during file upload.
+    FileUploadError(String),
+    /// The abort handle for an in-progress file upload.
+    FileUploadAbortHandle(tokio::task::AbortHandle),
 }
 
 thread_local! {
@@ -3037,6 +3415,10 @@ struct TimelineUiState {
     /// in a sync context and the sender runs in an async context,
     /// which is okay because a sender on an unbounded channel never needs to block.
     update_receiver: crossbeam_channel::Receiver<TimelineUpdate>,
+
+    /// The channel sender for timeline updates for this room.
+    /// This is passed to child widgets that need to send updates to this timeline.
+    update_sender: crossbeam_channel::Sender<TimelineUpdate>,
 
     /// The sender for timeline requests from a RoomScreen showing this room
     /// to the background async task that handles this room's timeline updates.
@@ -4495,6 +4877,7 @@ fn populate_small_state_group_header(
                             TimelineItemContent::MembershipChange(membership_change) => populate_small_state_event(cx, list, tl_idx, timeline_kind, event_tl_item, membership_change, item_drawn_status),
                             TimelineItemContent::ProfileChange(profile_change) => populate_small_state_event(cx, list, tl_idx, timeline_kind, event_tl_item, profile_change, item_drawn_status),
                             TimelineItemContent::OtherState(other_state) => populate_small_state_event(cx, list, tl_idx, timeline_kind, event_tl_item, other_state, item_drawn_status),
+                            TimelineItemContent::RtcNotification | TimelineItemContent::CallInvite => populate_call_notification_event(cx, list, tl_idx, timeline_kind, event_tl_item, item_drawn_status),
                             _=> (list.item_with_existed(cx, tl_idx, id!(Empty)).0, item_drawn_status)
                         };
                         if item_drawn_status.content_drawn {
@@ -4762,6 +5145,58 @@ fn get_profile_display_name(event_tl_item: &EventTimelineItem) -> Option<String>
     } else {
         None
     }
+}
+
+/// Creates, populates, and adds a CallNotificationEvent widget to the given `PortalList`
+/// for RtcNotification and CallInvite timeline events.
+fn populate_call_notification_event(
+    cx: &mut Cx,
+    list: &mut PortalList,
+    item_id: usize,
+    timeline_kind: &TimelineKind,
+    event_tl_item: &EventTimelineItem,
+    item_drawn_status: ItemDrawnStatus,
+) -> (WidgetRef, ItemDrawnStatus) {
+    let mut new_drawn_status = item_drawn_status;
+    let (item, existed) = list.item_with_existed(cx, item_id, id!(CallNotificationEvent));
+
+    let skip_redrawing_profile = existed && item_drawn_status.profile_drawn;
+    let skip_redrawing_content = skip_redrawing_profile && item_drawn_status.content_drawn;
+
+    if skip_redrawing_content {
+        return (item, new_drawn_status);
+    }
+
+    // Set the avatar and get the username
+    let avatar_ref = item.avatar(cx, ids!(avatar));
+    let (username, profile_drawn) = avatar_ref.set_avatar_and_get_username(
+        cx,
+        timeline_kind,
+        event_tl_item.sender(),
+        Some(event_tl_item.sender_profile()),
+        event_tl_item.event_id(),
+        true,
+    );
+    new_drawn_status.profile_drawn = profile_drawn;
+
+    // Draw the timestamp
+    if let Some(dt) = unix_time_millis_to_datetime(event_tl_item.timestamp()) {
+        item.timestamp(cx, ids!(left_container.timestamp)).set_date_time(cx, dt);
+    }
+
+    // Set the content text based on the event type
+    let content_text = match event_tl_item.content() {
+        TimelineItemContent::RtcNotification => format!("{} started a call", username),
+        TimelineItemContent::CallInvite => format!("{} is calling", username),
+        _ => format!("{} initiated a call", username),
+    };
+    item.label(cx, ids!(content)).set_text(cx, &content_text);
+
+    // Store the room_id in the button for the join action
+    // The join button click will be handled in handle_event
+
+    new_drawn_status.content_drawn = true;
+    (item, new_drawn_status)
 }
 
 

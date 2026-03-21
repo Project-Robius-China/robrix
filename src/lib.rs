@@ -77,7 +77,13 @@ pub mod avatar_cache;
 pub mod media_cache;
 pub mod verification;
 
+/// WebRTC video/audio calling support using MatrixRTC protocol.
+pub mod call;
+/// Multi-account management for supporting multiple Matrix accounts simultaneously.
+pub mod account_manager;
+
 pub mod utils;
+pub mod image_utils;
 pub mod temp_storage;
 pub mod location;
 

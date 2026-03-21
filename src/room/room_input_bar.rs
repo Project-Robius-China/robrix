@@ -20,7 +20,26 @@ use makepad_widgets::*;
 use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk_ui::timeline::{EmbeddedEvent, EventTimelineItem, TimelineEventItemId};
 use ruma::{events::room::message::{LocationMessageEventContent, MessageType, ReplyWithinThread, RoomMessageEventContent}, OwnedRoomId};
-use crate::{home::{editing_pane::{EditingPaneState, EditingPaneWidgetExt, EditingPaneWidgetRefExt}, location_preview::{LocationPreviewWidgetExt, LocationPreviewWidgetRefExt}, room_screen::{MessageAction, RoomScreenProps, populate_preview_of_timeline_item}, tombstone_footer::{SuccessorRoomDetails, TombstoneFooterWidgetExt}}, location::init_location_subscriber, shared::{avatar::AvatarWidgetRefExt, html_or_plaintext::HtmlOrPlaintextWidgetRefExt, mentionable_text_input::MentionableTextInputWidgetExt, popup_list::{PopupKind, enqueue_popup_notification}, styles::*}, sliding_sync::{MatrixRequest, TimelineKind, UserPowerLevels, submit_async_request}, utils};
+use crate::{
+    home::{
+        editing_pane::{EditingPaneState, EditingPaneWidgetExt, EditingPaneWidgetRefExt},
+        location_preview::{LocationPreviewWidgetExt, LocationPreviewWidgetRefExt},
+        room_screen::{MessageAction, RoomScreenProps, populate_preview_of_timeline_item},
+        tombstone_footer::{SuccessorRoomDetails, TombstoneFooterWidgetExt},
+        upload_progress::UploadProgressViewWidgetExt,
+    },
+    location::init_location_subscriber,
+    shared::{
+        avatar::AvatarWidgetRefExt,
+        file_upload_modal::{FileData, FileLoadReceiver, FileLoadedData, FilePreviewerAction, FilePreviewerMetaData},
+        html_or_plaintext::HtmlOrPlaintextWidgetRefExt,
+        mentionable_text_input::MentionableTextInputWidgetExt,
+        popup_list::{PopupKind, enqueue_popup_notification},
+        styles::*,
+    },
+    sliding_sync::{MatrixRequest, TimelineKind, UserPowerLevels, submit_async_request},
+    utils,
+};
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -60,6 +79,9 @@ script_mod! {
         // Below that, display a preview of the current location that a user is about to send.
         location_preview := LocationPreview { }
 
+        // Upload progress bar (shown during file uploads)
+        upload_progress := UploadProgressView { }
+
         // Below that, display one of multiple possible views:
         // * the message input bar (buttons and message TextInput).
         // * a notice that the user can't send messages to this room.
@@ -79,6 +101,24 @@ script_mod! {
                 // even when the mentionable_text_input box is very tall.
                 align: Align{y: 1.0},
                 padding: 6,
+
+                // Button to add file attachments
+                attachment_button := RobrixIconButton {
+                    margin: 4
+                    spacing: 0,
+                    draw_icon +: {
+                        svg: (ICON_UPLOAD)
+                        color: (COLOR_ACTIVE_PRIMARY_DARKER)
+                    },
+                    draw_bg +: {
+                        color: (COLOR_BG_PREVIEW)
+                        color_hover: #E0E8F0
+                        color_down: #D0D8E8
+                        color_focus: (COLOR_BG_PREVIEW)
+                    }
+                    icon_walk: Walk{width: 21, height: 21}
+                    text: "",
+                }
 
                 location_button := RobrixIconButton {
                     margin: 4
@@ -170,6 +210,9 @@ pub struct RoomInputBar {
     #[rust] was_replying_preview_visible: bool,
     /// Info about the message event that the user is currently replying to, if any.
     #[rust] replying_to: Option<(EventTimelineItem, EmbeddedEvent)>,
+    /// The pending file load operation, if any. Contains the receiver
+    /// channel for receiving the loaded file data from a background thread.
+    #[rust] pending_file_load: Option<FileLoadReceiver>,
 }
 
 impl Widget for RoomInputBar {
@@ -204,6 +247,44 @@ impl Widget for RoomInputBar {
             self.handle_actions(cx, actions, room_screen_props);
         }
 
+        // Handle file load completion from background thread
+        if let Event::Signal = event {
+            if let Some(receiver) = &self.pending_file_load {
+                match receiver.try_recv() {
+                    Ok(Some(loaded_data)) => {
+                        // Use the timeline update sender from props so the file upload modal
+                        // can send confirmation back to this specific timeline.
+                        if let Some(timeline_update_sender) = &room_screen_props.timeline_update_sender {
+                            let file_data = FileData::new(loaded_data, timeline_update_sender.clone());
+                            cx.action(FilePreviewerAction::Show(file_data));
+                        } else {
+                            error!("Timeline update sender not available for file upload");
+                            enqueue_popup_notification(
+                                "Failed to prepare file upload",
+                                PopupKind::Error,
+                                None,
+                            );
+                        }
+                        self.pending_file_load = None;
+                        self.redraw(cx);
+                    }
+                    Ok(None) => {
+                        // File loading was cancelled or failed
+                        self.pending_file_load = None;
+                        self.redraw(cx);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        // Still loading, do nothing
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // Sender dropped, clean up
+                        self.pending_file_load = None;
+                        self.redraw(cx);
+                    }
+                }
+            }
+        }
+
         self.view.handle_event(cx, event, scope);
     }
 
@@ -229,6 +310,98 @@ impl RoomInputBar {
         {
             self.clear_replying_to(cx);
             self.redraw(cx);
+        }
+
+        // Handle the attachment button being clicked.
+        // Note: File attachments with preview modal are only supported on desktop platforms.
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        if self.button(cx, ids!(attachment_button)).clicked(actions) {
+            log!("Attachment button clicked; opening file picker...");
+
+            // Use rfd directly on the main thread (modal dialog blocks until selection)
+            let file_dialog = rfd::FileDialog::new()
+                .set_title("Select file to upload");
+
+            if let Some(selected_file_path) = file_dialog.pick_file() {
+                // Check file metadata first
+                let file_size = match std::fs::metadata(&selected_file_path) {
+                    Ok(metadata) => metadata.len(),
+                    Err(e) => {
+                        error!("Failed to read file metadata for {:?}: {}", selected_file_path, e);
+                        enqueue_popup_notification(
+                            format!("Unable to access file: {}", e),
+                            PopupKind::Error,
+                            None,
+                        );
+                        return;
+                    }
+                };
+
+                // Validate file is not empty
+                if file_size == 0 {
+                    enqueue_popup_notification(
+                        "Cannot upload empty file.",
+                        PopupKind::Error,
+                        None,
+                    );
+                    return;
+                }
+
+                // Detect the MIME type from the file extension
+                let mime_str = mime_guess::from_path(&selected_file_path)
+                    .first_or_octet_stream()
+                    .to_string();
+                use mime_guess::mime;
+                let mime: mime::Mime = mime_str.parse().unwrap_or(mime::APPLICATION_OCTET_STREAM);
+
+                // Create a channel to receive the loaded file data from the background thread
+                let (sender, receiver) = std::sync::mpsc::channel();
+                self.pending_file_load = Some(receiver);
+
+                // Read file and generate thumbnail in background thread to avoid blocking the UI
+                cx.spawn_thread(move || {
+                    use crate::image_utils::generate_thumbnail_dimension_if_image;
+
+                    match generate_thumbnail_dimension_if_image(&selected_file_path, &mime) {
+                        Ok((thumbnail, dimensions)) => {
+                            let loaded_data = FileLoadedData {
+                                metadata: FilePreviewerMetaData {
+                                    mime,
+                                    file_size,
+                                    file_path: selected_file_path.clone(),
+                                },
+                                thumbnail,
+                                dimensions,
+                            };
+                            if sender.send(Some(loaded_data)).is_err() {
+                                error!("Failed to send file data to UI: receiver dropped");
+                            }
+                        }
+                        Err(read_error) => {
+                            error!("Failed to read file {:?}: {}", selected_file_path, read_error);
+                            enqueue_popup_notification(
+                                format!("Unable to read the file: {}", read_error),
+                                PopupKind::Error,
+                                None,
+                            );
+                            if sender.send(None).is_err() {
+                                error!("Failed to send file data to UI: receiver dropped");
+                            }
+                        }
+                    }
+                    SignalToUI::set_ui_signal();
+                });
+            }
+        }
+
+        // On mobile platforms, show a notification that file attachments are not yet supported.
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        if self.button(cx, ids!(attachment_button)).clicked(actions) {
+            enqueue_popup_notification(
+                "File attachments are not yet supported on this platform.",
+                PopupKind::Warning,
+                Some(3.0),
+            );
         }
 
         // Handle the add location button being clicked.
@@ -663,6 +836,32 @@ impl RoomInputBarRef {
         // 4. Restore the state of the tombstone footer.
         //    This depends on the `EditingPane` state, so it must be done after Step 3.
         inner.update_tombstone_footer(cx, timeline_kind.room_id(), tombstone_info);
+    }
+
+    /// Sets the upload progress value and shows the progress view.
+    pub fn set_upload_progress(&self, cx: &mut Cx, current: u64, total: u64) {
+        let Some(inner) = self.borrow_mut() else { return };
+        let upload_progress = inner.upload_progress_view(cx, ids!(upload_progress));
+        upload_progress.set_visible(cx, true);
+        upload_progress.set_value(cx, current, total);
+    }
+
+    /// Hides the upload progress view.
+    pub fn hide_upload_progress(&self, cx: &mut Cx) {
+        let Some(inner) = self.borrow_mut() else { return };
+        inner.upload_progress_view(cx, ids!(upload_progress)).hide(cx);
+    }
+
+    /// Sets the abort handle for the current upload operation.
+    pub fn set_upload_abort_handle(&self, cx: &mut Cx, handle: tokio::task::AbortHandle) {
+        let Some(inner) = self.borrow_mut() else { return };
+        inner.upload_progress_view(cx, ids!(upload_progress)).set_abort_handle(handle);
+    }
+
+    /// Shows an error state in the upload progress view.
+    pub fn show_upload_error(&self, cx: &mut Cx, error: String, file_data: crate::shared::file_upload_modal::FileData) {
+        let Some(inner) = self.borrow_mut() else { return };
+        inner.upload_progress_view(cx, ids!(upload_progress)).show_error(cx, error, file_data);
     }
 }
 

@@ -18,6 +18,7 @@ pub mod room_read_receipt;
 pub mod rooms_list;
 pub mod rooms_list_entry;
 pub mod rooms_list_header;
+pub mod rooms_list_header_dropdown;
 pub mod rooms_sidebar;
 pub mod search_messages;
 pub mod space_lobby;
@@ -27,10 +28,13 @@ pub mod welcome_screen;
 pub mod event_reaction_list;
 pub mod new_message_context_menu;
 pub mod room_context_menu;
+pub mod space_context_menu;
 pub mod link_preview;
 pub mod room_image_viewer;
 pub mod members_panel;
 pub mod event_group;
+pub mod thumbnail_loading;
+pub mod upload_progress;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     search_messages::script_mod(vm);
@@ -43,12 +47,14 @@ pub fn script_mod(vm: &mut ScriptVm) {
     room_read_receipt::script_mod(vm);
     rooms_list_entry::script_mod(vm);
     rooms_list_header::script_mod(vm);
+    rooms_list_header_dropdown::script_mod(vm);
     rooms_list::script_mod(vm);
     edited_indicator::script_mod(vm);
     editing_pane::script_mod(vm);
     new_message_context_menu::script_mod(vm);
     event_source_modal::script_mod(vm);
     room_context_menu::script_mod(vm);
+    space_context_menu::script_mod(vm);
     invite_modal::script_mod(vm);
     invite_screen::script_mod(vm);
     tombstone_footer::script_mod(vm);
@@ -61,6 +67,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     main_desktop_ui::script_mod(vm);
     spaces_bar::script_mod(vm);
     navigation_tab_bar::script_mod(vm);
+    thumbnail_loading::script_mod(vm);
+    upload_progress::script_mod(vm);
     // Keep HomeScreen last, it references many widgets registered above.
     home_screen::script_mod(vm);
 }

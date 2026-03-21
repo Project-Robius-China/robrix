@@ -6,6 +6,7 @@ script_mod! {
     use mod.widgets.*
 
     mod.widgets.ICON_ADD              = crate_resource("self://resources/icons/add.svg")
+    mod.widgets.ICON_ADD_ATTACHMENT   = crate_resource("self://resources/icons/add_attachment.svg")
     mod.widgets.ICON_ADD_REACTION     = crate_resource("self://resources/icons/add_reaction.svg")
     mod.widgets.ICON_ADD_USER         = crate_resource("self://resources/icons/add_user.svg") // TODO: FIX
     mod.widgets.ICON_ADD_WALLET       = crate_resource("self://resources/icons/add_wallet.svg")
@@ -19,6 +20,7 @@ script_mod! {
     mod.widgets.ICON_COPY             = crate_resource("self://resources/icons/copy.svg")
     mod.widgets.ICON_EDIT             = crate_resource("self://resources/icons/edit.svg")
     mod.widgets.ICON_EXTERNAL_LINK    = crate_resource("self://resources/icons/external_link.svg")
+    mod.widgets.ICON_FILE             = crate_resource("self://resources/icons/file.svg")
     mod.widgets.ICON_IMPORT           = crate_resource("self://resources/icons/import.svg") // TODO: FIX
     mod.widgets.ICON_HIERARCHY        = crate_resource("self://resources/icons/hierarchy.svg")
     mod.widgets.ICON_HOME             = crate_resource("self://resources/icons/home.svg")
@@ -44,6 +46,9 @@ script_mod! {
     mod.widgets.ICON_WARNING          = crate_resource("self://resources/icons/warning.svg")
     mod.widgets.ICON_ZOOM_IN          = crate_resource("self://resources/icons/zoom_in.svg")
     mod.widgets.ICON_ZOOM_OUT         = crate_resource("self://resources/icons/zoom_out.svg")
+    mod.widgets.ICON_VOICE_CALL       = crate_resource("self://resources/icons/voice_call.svg")
+    mod.widgets.ICON_VIDEO_CALL       = crate_resource("self://resources/icons/video_call.svg")
+    mod.widgets.ICON_PHONE_HANGUP     = crate_resource("self://resources/icons/phone_hangup.svg")
 
     mod.widgets.TITLE_TEXT = theme.font_regular {
         font_size: (13),

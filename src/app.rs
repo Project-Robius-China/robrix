@@ -17,11 +17,15 @@ use std::io::Write;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::fs::{File, OpenOptions};
 use crate::{
-    avatar_cache::clear_avatar_cache, home::{
-        event_source_modal::{EventSourceModalAction, EventSourceModalWidgetRefExt}, invite_modal::{InviteModalAction, InviteModalWidgetRefExt}, main_desktop_ui::MainDesktopUiAction, navigation_tab_bar::{NavigationBarAction, SelectedTab}, new_message_context_menu::NewMessageContextMenuWidgetRefExt, room_context_menu::RoomContextMenuWidgetRefExt, room_screen::{InviteAction, MessageAction, clear_timeline_states}, rooms_list::{RoomsListAction, RoomsListRef, RoomsListUpdate, clear_all_invited_rooms, enqueue_rooms_list_update}
+    avatar_cache::clear_avatar_cache,
+    call::call_state::CallAction,
+    call::call_controls::CallControlsAction,
+    call::call_screen::CallScreenWidgetRefExt,
+    home::{
+        event_source_modal::{EventSourceModalAction, EventSourceModalWidgetRefExt}, invite_modal::{InviteModalAction, InviteModalWidgetRefExt}, main_desktop_ui::MainDesktopUiAction, navigation_tab_bar::{NavigationBarAction, SelectedTab}, new_message_context_menu::NewMessageContextMenuWidgetRefExt, room_context_menu::RoomContextMenuWidgetRefExt, space_context_menu::{SpaceContextMenuDetails, SpaceContextMenuWidgetRefExt}, spaces_bar::SpacesBarAction, room_screen::{InviteAction, MessageAction, clear_timeline_states}, rooms_list::{RoomsListAction, RoomsListRef, RoomsListUpdate, RoomsListWidgetRefExt, clear_all_invited_rooms, enqueue_rooms_list_update}, rooms_list_header::RoomsListHeaderAction, rooms_list_header_dropdown::RoomsListHeaderDropdownWidgetRefExt
     }, join_leave_room_modal::{
         JoinLeaveModalKind, JoinLeaveRoomModalAction, JoinLeaveRoomModalWidgetRefExt
-    }, login::login_screen::LoginAction, logout::logout_confirm_modal::{LogoutAction, LogoutConfirmModalAction, LogoutConfirmModalWidgetRefExt}, persistence, profile::user_profile_cache::clear_user_profile_cache, room::BasicRoomDetails, shared::{confirmation_modal::{ConfirmationModalContent, ConfirmationModalWidgetRefExt}, image_viewer::{ImageViewerAction, ImageViewerWidgetRefExt, LoadState}, popup_list::{PopupKind, enqueue_popup_notification}}, sliding_sync::{DirectMessageRoomAction, MatrixRequest, current_user_id, get_sync_service, submit_async_request}, utils::RoomNameId, verification::VerificationAction, verification_modal::{
+    }, login::login_screen::LoginAction, logout::logout_confirm_modal::{LogoutAction, LogoutConfirmModalAction, LogoutConfirmModalWidgetRefExt}, persistence, profile::user_profile_cache::clear_user_profile_cache, room::BasicRoomDetails, shared::{confirmation_modal::{ConfirmationModalContent, ConfirmationModalWidgetRefExt}, file_upload_modal::FilePreviewerAction, image_viewer::{ImageViewerAction, ImageViewerWidgetRefExt, LoadState}, popup_list::{PopupKind, enqueue_popup_notification}}, sliding_sync::{AccountSwitchAction, DirectMessageRoomAction, MatrixRequest, current_user_id, get_sync_service, submit_async_request}, utils::RoomNameId, verification::VerificationAction, verification_modal::{
         VerificationModalAction,
         VerificationModalWidgetRefExt,
     }
@@ -74,11 +78,21 @@ script_mod! {
                             width: Fill, height: Fill,
                             image_viewer_modal_inner := ImageViewer {}
                         }
-                        
+
+                        file_upload_modal := Modal {
+                            content +: {
+                                height: Fill, width: Fill,
+                                align: Align{x: 0.5, y: 0.5},
+                                file_upload_modal_inner := FileUploadModal {}
+                            }
+                        }
+
                         // Context menus should be shown in front of other UI elements,
                         // but behind verification modals.
                         new_message_context_menu := NewMessageContextMenu { }
                         room_context_menu := RoomContextMenu { }
+                        space_context_menu := SpaceContextMenu { }
+                        rooms_list_header_dropdown := RoomsListHeaderDropdown { }
 
                         // A modal to confirm sending out an invite to a room.
                         invite_confirmation_modal := Modal {
@@ -143,6 +157,17 @@ script_mod! {
                             content +: {
                                 delete_confirmation_modal_inner := NegativeConfirmationModal { }
                             }
+                        }
+
+                        // Call overlay - shown fullscreen during active calls
+                        call_overlay := SolidView {
+                            visible: false,
+                            width: Fill, height: Fill,
+                            show_bg: true,
+                            draw_bg +: {
+                                color: #e8e8e8
+                            }
+                            call_screen := CallScreen {}
                         }
 
                         PopupList {}
@@ -501,9 +526,79 @@ impl MatchEvent for App {
             if let Some(LoginAction::LoginSuccess) = action.downcast_ref() {
                 log!("Received LoginAction::LoginSuccess, hiding login view.");
                 self.app_state.logged_in = true;
+                self.app_state.adding_account = false;
                 self.update_login_visibility(cx);
                 self.ui.redraw(cx);
                 continue;
+            }
+
+            // Handle request to show login screen for adding another account
+            if let Some(LoginAction::ShowAddAccountScreen) = action.downcast_ref() {
+                log!("Received LoginAction::ShowAddAccountScreen, showing login view for adding account.");
+                self.app_state.adding_account = true;
+                self.ui.view(cx, ids!(login_screen_view)).set_visible(cx, true);
+                self.ui.redraw(cx);
+                continue;
+            }
+
+            // Handle successful addition of a new account
+            if let Some(LoginAction::AddAccountSuccess) = action.downcast_ref() {
+                log!("Received LoginAction::AddAccountSuccess, hiding login view.");
+                self.app_state.adding_account = false;
+                self.ui.view(cx, ids!(login_screen_view)).set_visible(cx, false);
+                self.ui.redraw(cx);
+                continue;
+            }
+
+            // Handle cancellation of adding an account
+            if let Some(LoginAction::CancelAddAccount) = action.downcast_ref() {
+                log!("Received LoginAction::CancelAddAccount, hiding login view.");
+                self.app_state.adding_account = false;
+                self.ui.view(cx, ids!(login_screen_view)).set_visible(cx, false);
+                self.ui.redraw(cx);
+                continue;
+            }
+
+            // Handle account switch actions
+            match action.downcast_ref() {
+                Some(AccountSwitchAction::Starting(user_id)) => {
+                    log!("Account switch starting to: {}", user_id);
+                    // Clear UI state during account switch
+                    clear_all_app_state(cx);
+                    self.app_state.selected_room = None;
+                    // Clear saved dock state so tabs will be closed
+                    self.app_state.saved_dock_state_home = Default::default();
+                    self.app_state.saved_dock_state_per_space.clear();
+                    // Reload the dock from the now-empty app state to close all tabs
+                    cx.action(MainDesktopUiAction::LoadDockFromAppState);
+                    enqueue_popup_notification(
+                        format!("Switching to account {}...", user_id),
+                        PopupKind::Info,
+                        Some(5.0),
+                    );
+                    self.ui.redraw(cx);
+                    continue;
+                }
+                Some(AccountSwitchAction::Switched(user_id)) => {
+                    log!("Account switch completed to: {}", user_id);
+                    enqueue_popup_notification(
+                        format!("Switched to account {}", user_id),
+                        PopupKind::Info,
+                        Some(5.0),
+                    );
+                    self.ui.redraw(cx);
+                    continue;
+                }
+                Some(AccountSwitchAction::Failed(error)) => {
+                    log!("Account switch failed: {}", error);
+                    enqueue_popup_notification(
+                        format!("Failed to switch account: {}", error),
+                        PopupKind::Error,
+                        None,
+                    );
+                    continue;
+                }
+                _ => {}
             }
 
             // Handle an action requesting to open the new message context menu.
@@ -545,6 +640,72 @@ impl MatchEvent for App {
                     bottom: 0.0,
                 };
                 let mut main_content_view = room_context_menu.view(cx, ids!(main_content));
+                script_apply_eval!(cx, main_content_view, {
+                    margin: #(margin)
+                });
+                self.ui.redraw(cx);
+                continue;
+            }
+
+            // Handle an action requesting to open the space context menu.
+            if let SpacesBarAction::ButtonSecondaryClicked { space_name_id, pos } = action.as_widget_action().cast() {
+                // Get the space_request_sender from the RoomsList widget.
+                let rooms_list: RoomsListRef = self.ui.rooms_list(cx, ids!(rooms_list));
+                let Some(space_request_sender) = rooms_list.get_space_request_sender() else {
+                    log!("Warning: could not get space_request_sender to open space context menu");
+                    continue;
+                };
+                self.ui.callout_tooltip(cx, ids!(app_tooltip)).hide(cx);
+                let space_context_menu = self.ui.space_context_menu(cx, ids!(space_context_menu));
+                let details = SpaceContextMenuDetails {
+                    space_name_id,
+                    space_request_sender,
+                };
+                let expected_dimensions = space_context_menu.show(cx, details);
+                // Ensure the context menu does not spill over the window's bounds.
+                let rect = self.ui.window(cx, ids!(main_window)).area().rect(cx);
+                let pos_x = min(pos.x, rect.size.x - expected_dimensions.x);
+                let pos_y = min(pos.y, rect.size.y - expected_dimensions.y);
+                let margin = Inset {
+                    left: pos_x as f64,
+                    top: pos_y as f64,
+                    right: 0.0,
+                    bottom: 0.0,
+                };
+                let mut main_content_view = space_context_menu.view(cx, ids!(main_content));
+                script_apply_eval!(cx, main_content_view, {
+                    margin: #(margin)
+                });
+                self.ui.redraw(cx);
+                continue;
+            }
+
+            // Handle an action requesting to toggle the rooms list header dropdown.
+            if let Some(RoomsListHeaderAction::ShowDropdown { pos, filter, sort }) = action.downcast_ref() {
+                let dropdown = self.ui.rooms_list_header_dropdown(cx, ids!(rooms_list_header_dropdown));
+                // Toggle: if already shown, hide it
+                if dropdown.is_currently_shown(cx) {
+                    if let Some(mut inner) = dropdown.borrow_mut() {
+                        inner.visible = false;
+                        inner.redraw(cx);
+                    }
+                    self.ui.redraw(cx);
+                    continue;
+                }
+                dropdown.show(cx, *pos, *filter, *sort);
+                // Ensure the dropdown does not spill over the window's bounds.
+                let rect = self.ui.window(cx, ids!(main_window)).area().rect(cx);
+                let dropdown_width = 200.0;
+                let dropdown_height = 350.0;
+                let pos_x = f64::min(pos.x, rect.size.x - dropdown_width);
+                let pos_y = f64::min(pos.y, rect.size.y - dropdown_height);
+                let margin = Inset {
+                    left: pos_x,
+                    top: pos_y,
+                    right: 0.0,
+                    bottom: 0.0,
+                };
+                let mut main_content_view = dropdown.view(cx, ids!(main_content));
                 script_apply_eval!(cx, main_content_view, {
                     margin: #(margin)
                 });
@@ -707,6 +868,20 @@ impl MatchEvent for App {
                 }
                 _ => {}
             }
+
+            // Handle actions to show/hide the file upload modal.
+            match action.downcast_ref() {
+                Some(FilePreviewerAction::Show(_)) => {
+                    self.ui.modal(cx, ids!(file_upload_modal)).open(cx);
+                    continue;
+                }
+                Some(FilePreviewerAction::Hide) => {
+                    self.ui.modal(cx, ids!(file_upload_modal)).close(cx);
+                    continue;
+                }
+                _ => {}
+            }
+
             // Handle actions to open/close the TSP verification modal.
             #[cfg(feature = "tsp")] {
                 use std::ops::Deref;
@@ -778,6 +953,85 @@ impl MatchEvent for App {
                     continue;
                 }
                 _ => {}
+            }
+
+            // Handle call-related actions
+            match action.downcast_ref() {
+                Some(CallAction::StateChanged { room_id: _, new_state }) => {
+                    // Update UI based on call state changes
+                    match new_state {
+                        crate::call::call_state::CallState::Connected { .. } => {
+                            // Show call overlay
+                            self.ui.view(cx, ids!(call_overlay)).set_visible(cx, true);
+                            self.ui.call_screen(cx, ids!(call_screen))
+                                .start_call_timer(cx);
+                        }
+                        crate::call::call_state::CallState::Idle
+                        | crate::call::call_state::CallState::Ended { .. } => {
+                            // Hide call overlay
+                            self.ui.view(cx, ids!(call_overlay)).set_visible(cx, false);
+                            self.ui.call_screen(cx, ids!(call_screen))
+                                .stop_call_timer();
+                        }
+                        _ => {}
+                    }
+                    self.ui.redraw(cx);
+                    continue;
+                }
+                Some(CallAction::ShowCallScreen { room_id, user_display_name }) => {
+                    // Show the call overlay immediately when joining
+                    self.ui.view(cx, ids!(call_overlay)).set_visible(cx, true);
+                    self.ui.call_screen(cx, ids!(call_screen))
+                        .set_room(cx, room_id.clone(), user_display_name.as_deref().unwrap_or(""));
+                    self.ui.call_screen(cx, ids!(call_screen))
+                        .start_call_timer(cx);
+                    self.ui.redraw(cx);
+                    continue;
+                }
+                Some(CallAction::HideCallScreen) => {
+                    // Hide the call overlay
+                    self.ui.view(cx, ids!(call_overlay)).set_visible(cx, false);
+                    self.ui.call_screen(cx, ids!(call_screen))
+                        .stop_call_timer();
+                    self.ui.redraw(cx);
+                    continue;
+                }
+                Some(CallAction::IncomingCall { room_id: _, caller, is_video_call }) => {
+                    // Show incoming call notification
+                    let call_type = if *is_video_call { "video" } else { "audio" };
+                    enqueue_popup_notification(
+                        format!("Incoming {} call from {}", call_type, caller.displayable_name()),
+                        PopupKind::Info,
+                        Some(30.0),
+                    );
+                    continue;
+                }
+                Some(CallAction::MediaError { error }) => {
+                    enqueue_popup_notification(
+                        format!("Call error: {}", error),
+                        PopupKind::Error,
+                        None,
+                    );
+                    continue;
+                }
+                _ => {}
+            }
+
+            // Handle call controls actions
+            match action.as_widget_action().cast() {
+                CallControlsAction::ToggleMute { room_id } => {
+                    submit_async_request(MatrixRequest::ToggleCallAudio { room_id });
+                    continue;
+                }
+                CallControlsAction::ToggleCamera { room_id } => {
+                    submit_async_request(MatrixRequest::ToggleCallVideo { room_id });
+                    continue;
+                }
+                CallControlsAction::EndCall { room_id } => {
+                    submit_async_request(MatrixRequest::LeaveCall { room_id });
+                    continue;
+                }
+                CallControlsAction::None => {}
             }
 
             // Handle DirectMessageRoomActions
@@ -871,6 +1125,8 @@ impl AppMain for App {
         crate::home::script_mod(vm);
         crate::login::script_mod(vm);
         crate::logout::script_mod(vm);
+        // WebRTC call support
+        crate::call::script_mod(vm);
 
         self::script_mod(vm)
     }
@@ -1085,10 +1341,18 @@ pub struct AppState {
     pub saved_dock_state_per_space: HashMap<OwnedRoomId, SavedDockState>,
     /// Whether a user is currently logged in to Robrix or not.
     pub logged_in: bool,
+    /// Whether the app is currently showing the login screen for adding another account.
+    /// This is transient state and not persisted.
+    #[serde(skip)]
+    pub adding_account: bool,
 }
 
 /// A snapshot of the main dock: all state needed to restore the dock tabs/layout.
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+///
+/// This struct uses custom serialization to store room IDs as strings instead of
+/// Makepad `LiveId` hashes, making the persisted state human-readable and robust
+/// against hash algorithm changes.
+#[derive(Clone, Default, Debug)]
 pub struct SavedDockState {
     /// All items contained in the dock, keyed by their room or space ID.
     pub dock_items: HashMap<LiveId, DockItem>,
@@ -1099,6 +1363,257 @@ pub struct SavedDockState {
     pub room_order: Vec<SelectedRoom>,
     /// The selected room tab in this dock when the dock state was saved.
     pub selected_room: Option<SelectedRoom>,
+}
+
+/// Serializable version of `DockItem` that uses strings instead of `LiveId`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SerializableDockItem {
+    Splitter {
+        axis: SplitterAxis,
+        align: SplitterAlign,
+        a: String,
+        b: String,
+    },
+    Tabs {
+        tabs: Vec<String>,
+        selected: usize,
+        closable: bool,
+        #[serde(default)]
+        hide_tab_bar: bool,
+    },
+    Tab {
+        name: String,
+        template: String,
+        kind: String,
+    },
+}
+
+/// Serializable version of `SavedDockState` that uses room ID strings as keys.
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+pub struct SerializableSavedDockState {
+    /// All items contained in the dock, keyed by room ID string or internal ID.
+    pub dock_items: HashMap<String, SerializableDockItem>,
+    /// The rooms that are currently open, keyed by their room ID string.
+    pub open_rooms: HashMap<String, SelectedRoom>,
+    /// The order in which the rooms were opened.
+    pub room_order: Vec<SelectedRoom>,
+    /// The selected room tab in this dock when the dock state was saved.
+    pub selected_room: Option<SelectedRoom>,
+}
+
+impl SavedDockState {
+    /// Converts a `LiveId` to a string key for serialization.
+    ///
+    /// For room tabs, uses the room ID string from `open_rooms`.
+    /// For internal dock items (splitters, tab containers), uses a hex representation.
+    fn live_id_to_string(&self, id: LiveId) -> String {
+        // Check if this LiveId corresponds to a known room
+        if let Some(selected_room) = self.open_rooms.get(&id) {
+            return selected_room.tab_id_string();
+        }
+        // For internal dock IDs (splitters, tab containers), use hex format
+        format!("__dock_{:016x}", id.0)
+    }
+
+    /// Converts a string key back to a `LiveId`.
+    fn string_to_live_id(s: &str) -> LiveId {
+        if let Some(hex) = s.strip_prefix("__dock_") {
+            // Internal dock ID - parse hex
+            LiveId(u64::from_str_radix(hex, 16).unwrap_or(0))
+        } else {
+            // Room ID string - hash it back to LiveId
+            LiveId::from_str(s)
+        }
+    }
+
+    /// Converts this `SavedDockState` to a serializable format with string keys.
+    pub fn to_serializable(&self) -> SerializableSavedDockState {
+        // Build the LiveId → String mapping
+        let id_to_string: HashMap<LiveId, String> = self.dock_items.keys()
+            .map(|id| (*id, self.live_id_to_string(*id)))
+            .collect();
+
+        // Convert dock_items
+        let dock_items = self.dock_items.iter()
+            .map(|(id, item)| {
+                let key = id_to_string.get(id).cloned().unwrap_or_else(|| self.live_id_to_string(*id));
+                let serializable_item = match item {
+                    DockItem::Splitter { axis, align, a, b } => SerializableDockItem::Splitter {
+                        axis: *axis,
+                        align: *align,
+                        a: id_to_string.get(a).cloned().unwrap_or_else(|| self.live_id_to_string(*a)),
+                        b: id_to_string.get(b).cloned().unwrap_or_else(|| self.live_id_to_string(*b)),
+                    },
+                    DockItem::Tabs { tabs, selected, closable, hide_tab_bar } => SerializableDockItem::Tabs {
+                        tabs: tabs.iter()
+                            .map(|t| id_to_string.get(t).cloned().unwrap_or_else(|| self.live_id_to_string(*t)))
+                            .collect(),
+                        selected: *selected,
+                        closable: *closable,
+                        hide_tab_bar: *hide_tab_bar,
+                    },
+                    DockItem::Tab { name, template, kind } => SerializableDockItem::Tab {
+                        name: name.clone(),
+                        template: live_id_to_known_string(*template),
+                        kind: live_id_to_known_string(*kind),
+                    },
+                };
+                (key, serializable_item)
+            })
+            .collect();
+
+        // Convert open_rooms to use room ID strings as keys
+        let open_rooms = self.open_rooms.iter()
+            .map(|(_, room)| (room.tab_id_string(), room.clone()))
+            .collect();
+
+        SerializableSavedDockState {
+            dock_items,
+            open_rooms,
+            room_order: self.room_order.clone(),
+            selected_room: self.selected_room.clone(),
+        }
+    }
+
+    /// Creates a `SavedDockState` from a serializable format.
+    pub fn from_serializable(serializable: SerializableSavedDockState) -> Self {
+        // Convert dock_items
+        let dock_items = serializable.dock_items.iter()
+            .map(|(key, item)| {
+                let id = Self::string_to_live_id(key);
+                let dock_item = match item {
+                    SerializableDockItem::Splitter { axis, align, a, b } => DockItem::Splitter {
+                        axis: *axis,
+                        align: *align,
+                        a: Self::string_to_live_id(a),
+                        b: Self::string_to_live_id(b),
+                    },
+                    SerializableDockItem::Tabs { tabs, selected, closable, hide_tab_bar } => DockItem::Tabs {
+                        tabs: tabs.iter().map(|t| Self::string_to_live_id(t)).collect(),
+                        selected: *selected,
+                        closable: *closable,
+                        hide_tab_bar: *hide_tab_bar,
+                    },
+                    SerializableDockItem::Tab { name, template, kind } => DockItem::Tab {
+                        name: name.clone(),
+                        template: known_string_to_live_id(template),
+                        kind: known_string_to_live_id(kind),
+                    },
+                };
+                (id, dock_item)
+            })
+            .collect();
+
+        // Convert open_rooms
+        let open_rooms = serializable.open_rooms.iter()
+            .map(|(_, room)| (room.tab_id(), room.clone()))
+            .collect();
+
+        SavedDockState {
+            dock_items,
+            open_rooms,
+            room_order: serializable.room_order,
+            selected_room: serializable.selected_room,
+        }
+    }
+}
+
+/// Converts well-known LiveIds (like template and kind) to readable strings.
+fn live_id_to_known_string(id: LiveId) -> String {
+    // Check for well-known widget kinds
+    if id == id!(room_screen) { return "room_screen".to_string(); }
+    if id == id!(invite_screen) { return "invite_screen".to_string(); }
+    if id == id!(space_lobby_screen) { return "space_lobby_screen".to_string(); }
+    if id == id!(welcome_screen) { return "welcome_screen".to_string(); }
+    if id == id!(settings_screen) { return "settings_screen".to_string(); }
+    // Check for well-known templates
+    if id == id!(CloseableTab) { return "CloseableTab".to_string(); }
+    if id == id!(PermanentTab) { return "PermanentTab".to_string(); }
+    // Fallback to hex
+    format!("__id_{:016x}", id.0)
+}
+
+/// Converts string back to well-known LiveIds.
+fn known_string_to_live_id(s: &str) -> LiveId {
+    match s {
+        "room_screen" => id!(room_screen),
+        "invite_screen" => id!(invite_screen),
+        "space_lobby_screen" => id!(space_lobby_screen),
+        "welcome_screen" => id!(welcome_screen),
+        "settings_screen" => id!(settings_screen),
+        "CloseableTab" => id!(CloseableTab),
+        "PermanentTab" => id!(PermanentTab),
+        _ if s.starts_with("__id_") => {
+            let hex = &s[5..];
+            LiveId(u64::from_str_radix(hex, 16).unwrap_or(0))
+        }
+        _ => LiveId::from_str(s),
+    }
+}
+
+impl Serialize for SavedDockState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_serializable().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SavedDockState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // First, try to deserialize as the new format
+        let value = serde_json::Value::deserialize(deserializer)?;
+
+        // Check if this is the old format (keys are numeric LiveId values)
+        if let Some(obj) = value.as_object() {
+            if let Some(dock_items) = obj.get("dock_items").and_then(|v| v.as_object()) {
+                // Check if the first key looks like a numeric LiveId (old format)
+                if let Some(first_key) = dock_items.keys().next() {
+                    if first_key.parse::<u64>().is_ok() {
+                        // Old format detected - deserialize using legacy format
+                        return Self::deserialize_legacy(&value)
+                            .map_err(serde::de::Error::custom);
+                    }
+                }
+            }
+        }
+
+        // New format - deserialize as SerializableSavedDockState
+        let serializable: SerializableSavedDockState = serde_json::from_value(value)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self::from_serializable(serializable))
+    }
+}
+
+impl SavedDockState {
+    /// Deserializes from the legacy format where keys are numeric LiveId values.
+    fn deserialize_legacy(value: &serde_json::Value) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        struct LegacySavedDockState {
+            dock_items: HashMap<u64, DockItem>,
+            open_rooms: HashMap<u64, SelectedRoom>,
+            room_order: Vec<SelectedRoom>,
+            selected_room: Option<SelectedRoom>,
+        }
+
+        let legacy: LegacySavedDockState = serde_json::from_value(value.clone())
+            .map_err(|e| format!("Failed to deserialize legacy format: {e}"))?;
+
+        Ok(SavedDockState {
+            dock_items: legacy.dock_items.into_iter()
+                .map(|(id, item)| (LiveId(id), item))
+                .collect(),
+            open_rooms: legacy.open_rooms.into_iter()
+                .map(|(id, room)| (LiveId(id), room))
+                .collect(),
+            room_order: legacy.room_order,
+            selected_room: legacy.selected_room,
+        })
+    }
 }
 
 
@@ -1169,13 +1684,19 @@ impl SelectedRoom {
 
     /// Returns the `LiveId` of the room tab corresponding to this `SelectedRoom`.
     pub fn tab_id(&self) -> LiveId {
+        LiveId::from_str(&self.tab_id_string())
+    }
+
+    /// Returns the string key used for serialization and to generate the tab's `LiveId`.
+    ///
+    /// For threads, this includes both the room ID and thread root event ID.
+    /// For other rooms, this is just the room ID string.
+    pub fn tab_id_string(&self) -> String {
         match self {
             SelectedRoom::Thread { room_name_id, thread_root_event_id } => {
-                LiveId::from_str(
-                    &format!("{}##{}", room_name_id.room_id(), thread_root_event_id)
-                )
+                format!("{}##{}", room_name_id.room_id(), thread_root_event_id)
             }
-            other => LiveId::from_str(other.room_id().as_str()),
+            other => other.room_id().to_string(),
         }
     }
 

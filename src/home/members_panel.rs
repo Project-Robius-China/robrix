@@ -3,16 +3,67 @@
 //! This panel can be opened from the room screen to view, search, and interact
 //! with room members.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use crossbeam_queue::SegQueue;
 use makepad_widgets::*;
 use matrix_sdk::room::RoomMember;
-use ruma::OwnedUserId;
+use ruma::{OwnedRoomId, OwnedUserId};
 
 use crate::{
     profile::user_profile::{ShowUserProfileAction, UserProfile, UserProfileAndRoomId},
     shared::avatar::{AvatarState, AvatarWidgetRefExt},
+    sliding_sync::{submit_async_request, MatrixRequest},
     utils,
 };
+
+/// The debounce delay before triggering a background search (in seconds).
+const SEARCH_DEBOUNCE_DELAY: f64 = 0.3;
+
+/// The minimum number of members before using async search.
+/// For smaller lists, synchronous filtering is fast enough.
+const ASYNC_SEARCH_THRESHOLD: usize = 100;
+
+/// Maximum number of cached search results to prevent memory bloat.
+const SEARCH_CACHE_LIMIT: usize = 20;
+
+/// Search state for the members panel.
+#[derive(Clone, Debug, Default)]
+pub enum MemberSearchState {
+    /// No search is in progress.
+    #[default]
+    Idle,
+    /// Waiting for debounce timer to expire before searching.
+    Debouncing,
+    /// A background search is in progress.
+    Searching {
+        /// The query being searched.
+        query: String,
+        /// Unique ID to identify this search and discard stale results.
+        search_id: u64,
+    },
+}
+
+/// Result of a background member search operation.
+pub struct MemberSearchResult {
+    /// The unique ID of this search operation.
+    pub search_id: u64,
+    /// The room ID this search was for.
+    pub room_id: OwnedRoomId,
+    /// The search query that was used.
+    pub query: String,
+    /// Indices into the members list that matched the query.
+    pub matched_indices: Vec<usize>,
+}
+
+/// The queue of member search results waiting to be processed by the UI thread.
+static PENDING_MEMBER_SEARCH_RESULTS: SegQueue<MemberSearchResult> = SegQueue::new();
+
+/// Enqueues a new member search result and signals the UI.
+pub fn enqueue_member_search_result(result: MemberSearchResult) {
+    PENDING_MEMBER_SEARCH_RESULTS.push(result);
+    SignalToUI::set_ui_signal();
+}
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -222,12 +273,16 @@ script_mod! {
     }
 }
 
-/// Information about a displayed member
+/// Information about a displayed member.
+/// This is Clone and public to allow sharing with background search threads.
 #[derive(Clone, Debug)]
-struct DisplayedMember {
-    user_id: OwnedUserId,
-    display_name: Option<String>,
-    avatar_state: AvatarState,
+pub struct DisplayedMember {
+    /// The user ID of this member.
+    pub user_id: OwnedUserId,
+    /// The optional display name.
+    pub(crate) display_name: Option<String>,
+    /// The avatar state for this member.
+    pub(crate) avatar_state: AvatarState,
     role: Option<String>,
 }
 
@@ -249,7 +304,9 @@ impl DisplayedMember {
         }
     }
 
-    fn displayable_name(&self) -> &str {
+    /// Returns the name to display for this member.
+    /// Falls back to the user ID if no display name is set.
+    pub fn displayable_name(&self) -> &str {
         self.display_name.as_deref()
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| self.user_id.as_str())
@@ -270,25 +327,35 @@ pub struct MembersPanel {
     #[apply_default] animator: Animator,
     #[live] slide: f32,
 
-    /// The list of members to display
-    #[rust] members: Vec<DisplayedMember>,
-    /// The filtered list of members (based on search)
+    /// The list of members to display (Arc for sharing with background threads).
+    #[rust] members: Arc<Vec<DisplayedMember>>,
+    /// The filtered list of members (based on search).
     #[rust] filtered_members: Vec<usize>,
-    /// The current search query
+    /// The current search query.
     #[rust] search_query: String,
-    /// The room ID for the current members
-    #[rust] room_id: Option<ruma::OwnedRoomId>,
-    /// The room name
+    /// The room ID for the current members.
+    #[rust] room_id: Option<OwnedRoomId>,
+    /// The room name.
     #[rust] room_name: String,
-    /// Whether the panel is animating closed
+    /// Whether the panel is animating closed.
     #[rust] is_animating_out: bool,
+    /// Current state of member search.
+    #[rust] search_state: MemberSearchState,
+    /// Timer for debouncing search input.
+    #[rust] debounce_timer: Timer,
+    /// Monotonically increasing ID for search operations.
+    #[rust] next_search_id: u64,
+    /// Cache of recent search results (query -> matched indices).
+    #[rust] search_cache: HashMap<String, Vec<usize>>,
 }
 
 impl Widget for MembersPanel {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
 
-        if !self.visible { return; }
+        if !self.visible {
+            return;
+        }
 
         let animator_action = self.animator_handle_event(cx, event);
         if animator_action.must_redraw() {
@@ -303,6 +370,18 @@ impl Widget for MembersPanel {
             self.view(cx, ids!(bg_view)).set_visible(cx, false);
             self.redraw(cx);
             return;
+        }
+
+        // Handle debounce timer expiration - trigger async search
+        if self.debounce_timer.is_event(event).is_some() {
+            if let MemberSearchState::Debouncing = &self.search_state {
+                self.start_async_search(cx);
+            }
+        }
+
+        // Handle Signal events - process search results from background thread
+        if let Event::Signal = event {
+            self.process_search_results(cx);
         }
 
         let area = self.view.area();
@@ -334,9 +413,7 @@ impl Widget for MembersPanel {
             // Handle search input changes
             let search_input = self.text_input(cx, ids!(search_input));
             if let Some(new_text) = search_input.changed(actions) {
-                self.search_query = new_text;
-                self.filter_members();
-                self.redraw(cx);
+                self.handle_search_input_changed(cx, new_text);
             }
 
             // Handle member selection from portal list
@@ -367,24 +444,39 @@ impl Widget for MembersPanel {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        log!("MembersPanel::draw_walk() - visible={}, slide={}, members={}", self.visible, self.slide, self.filtered_members.len());
+
         // Apply slide animation by adjusting margin
-        let slide_offset = self.slide * 300.0;
+        let slide_offset = (self.slide * 300.0) as f64;
+        let margin = Inset {
+            left: 0.0,
+            top: 0.0,
+            right: -slide_offset,
+            bottom: 0.0,
+        };
         let mut main_content = self.view(cx, ids!(main_content));
         script_apply_eval!(cx, main_content, {
-            margin: Inset { right: #(-slide_offset) }
+            margin: #(margin)
         });
 
         // Set bg_view visibility based on animation state
         let bg_visible = self.slide < 1.0;
         self.view(cx, ids!(bg_view)).set_visible(cx, bg_visible);
 
-        // Update member count label
-        let count = self.filtered_members.len();
-        let total = self.members.len();
-        let count_text = if self.search_query.is_empty() {
-            format!("({})", total)
-        } else {
-            format!("({}/{})", count, total)
+        // Update member count label - show "Searching..." when search is in progress
+        let count_text = match &self.search_state {
+            MemberSearchState::Debouncing | MemberSearchState::Searching { .. } => {
+                "Searching...".to_string()
+            }
+            MemberSearchState::Idle => {
+                let count = self.filtered_members.len();
+                let total = self.members.len();
+                if self.search_query.is_empty() {
+                    format!("({})", total)
+                } else {
+                    format!("({}/{})", count, total)
+                }
+            }
         };
         self.label(cx, ids!(member_count)).set_text(cx, &count_text);
 
@@ -440,11 +532,13 @@ impl Widget for MembersPanel {
 impl MembersPanel {
     /// Shows the members panel
     pub fn show(&mut self, cx: &mut Cx) {
+        log!("MembersPanel::show() - setting visible=true");
         self.visible = true;
         self.view(cx, ids!(bg_view)).set_visible(cx, true);
         self.animator_play(cx, ids!(panel.show));
         cx.set_key_focus(self.view.area());
         self.redraw(cx);
+        log!("MembersPanel::show() - done");
     }
 
     /// Hides the members panel with animation
@@ -453,22 +547,131 @@ impl MembersPanel {
         self.animator_play(cx, ids!(panel.hide));
     }
 
-    /// Sets the members to display
-    pub fn set_members(&mut self, cx: &mut Cx, members: Arc<Vec<RoomMember>>, room_id: ruma::OwnedRoomId, room_name: String) {
-        self.members = members.iter()
-            .map(DisplayedMember::from_room_member)
-            .collect();
+    /// Sets the members to display.
+    pub fn set_members(&mut self, cx: &mut Cx, members: Arc<Vec<RoomMember>>, room_id: OwnedRoomId, room_name: String) {
+        log!("MembersPanel::set_members() - {} members for room {}", members.len(), room_id);
+        self.members = Arc::new(
+            members.iter()
+                .map(DisplayedMember::from_room_member)
+                .collect()
+        );
         self.room_id = Some(room_id);
         self.room_name = room_name;
         self.search_query.clear();
+        // Clear search state and cache when loading new members
+        self.search_state = MemberSearchState::Idle;
+        self.search_cache.clear();
+        cx.stop_timer(self.debounce_timer);
         // Clear the search input
         self.text_input(cx, ids!(search_input)).set_text(cx, "");
-        self.filter_members();
+        self.filter_members_sync();
+        log!("MembersPanel::set_members() - filtered to {} members", self.filtered_members.len());
         self.redraw(cx);
     }
 
-    /// Filters the members based on the current search query
-    fn filter_members(&mut self) {
+    /// Handles changes to the search input text.
+    fn handle_search_input_changed(&mut self, cx: &mut Cx, new_text: String) {
+        self.search_query = new_text.clone();
+
+        // For empty queries, show all members immediately
+        if new_text.is_empty() {
+            cx.stop_timer(self.debounce_timer);
+            self.search_state = MemberSearchState::Idle;
+            self.filtered_members = (0..self.members.len()).collect();
+            self.redraw(cx);
+            return;
+        }
+
+        // Check cache first
+        if let Some(cached_indices) = self.search_cache.get(&new_text) {
+            cx.stop_timer(self.debounce_timer);
+            self.search_state = MemberSearchState::Idle;
+            self.filtered_members = cached_indices.clone();
+            self.redraw(cx);
+            return;
+        }
+
+        // For small member lists, filter synchronously
+        if self.members.len() < ASYNC_SEARCH_THRESHOLD {
+            cx.stop_timer(self.debounce_timer);
+            self.search_state = MemberSearchState::Idle;
+            self.filter_members_sync();
+            self.redraw(cx);
+            return;
+        }
+
+        // For larger lists, use debounced async search
+        cx.stop_timer(self.debounce_timer);
+        self.debounce_timer = cx.start_timeout(SEARCH_DEBOUNCE_DELAY);
+        self.search_state = MemberSearchState::Debouncing;
+        self.redraw(cx);
+    }
+
+    /// Starts an async search operation on a background thread.
+    fn start_async_search(&mut self, cx: &mut Cx) {
+        let Some(room_id) = self.room_id.clone() else {
+            return;
+        };
+
+        let search_id = self.next_search_id;
+        self.next_search_id = self.next_search_id.wrapping_add(1);
+        let query = self.search_query.clone();
+
+        self.search_state = MemberSearchState::Searching {
+            query: query.clone(),
+            search_id,
+        };
+
+        submit_async_request(MatrixRequest::SearchRoomMembers {
+            search_id,
+            query,
+            room_id,
+            members: Arc::clone(&self.members),
+        });
+
+        self.redraw(cx);
+    }
+
+    /// Processes search results from the background thread queue.
+    fn process_search_results(&mut self, cx: &mut Cx) {
+        let mut needs_redraw = false;
+
+        while let Some(result) = PENDING_MEMBER_SEARCH_RESULTS.pop() {
+            // Only process results for the current room
+            if self.room_id.as_ref() != Some(&result.room_id) {
+                continue;
+            }
+
+            // Check if this result matches the current search state
+            if let MemberSearchState::Searching { search_id, query } = &self.search_state {
+                if result.search_id == *search_id && result.query == *query {
+                    // Update filtered members with the search results
+                    self.filtered_members = result.matched_indices.clone();
+
+                    // Cache the result (with LRU-style limit)
+                    if self.search_cache.len() >= SEARCH_CACHE_LIMIT {
+                        // Remove oldest entry (arbitrary key since HashMap doesn't preserve order)
+                        if let Some(key) = self.search_cache.keys().next().cloned() {
+                            self.search_cache.remove(&key);
+                        }
+                    }
+                    self.search_cache.insert(result.query, result.matched_indices);
+
+                    self.search_state = MemberSearchState::Idle;
+                    needs_redraw = true;
+                }
+                // Ignore stale results (different search_id or query)
+            }
+        }
+
+        if needs_redraw {
+            self.redraw(cx);
+        }
+    }
+
+    /// Filters the members synchronously based on the current search query.
+    /// Used for small member lists where async search would be overkill.
+    fn filter_members_sync(&mut self) {
         if self.search_query.is_empty() {
             self.filtered_members = (0..self.members.len()).collect();
         } else {
@@ -484,7 +687,7 @@ impl MembersPanel {
         }
     }
 
-    /// Returns whether the panel is currently shown
+    /// Returns whether the panel is currently shown.
     pub fn is_currently_shown(&self) -> bool {
         self.visible && !self.is_animating_out
     }
@@ -492,7 +695,7 @@ impl MembersPanel {
 
 impl MembersPanelRef {
     /// Shows the members panel with the given members
-    pub fn show_with_members(&self, cx: &mut Cx, members: Arc<Vec<RoomMember>>, room_id: ruma::OwnedRoomId, room_name: String) {
+    pub fn show_with_members(&self, cx: &mut Cx, members: Arc<Vec<RoomMember>>, room_id: OwnedRoomId, room_name: String) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_members(cx, members, room_id, room_name);
             inner.show(cx);
