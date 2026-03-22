@@ -312,9 +312,9 @@ impl Widget for FileUploadModal {
 impl WidgetMatchEvent for FileUploadModal {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         // Handle FilePreviewerAction::Show to display the modal
-        for action in actions {
-            if let FilePreviewerAction::Show(file_data) = action.as_widget_action().cast() {
-                self.show(cx, file_data);
+        for action in actions.iter() {
+            if let Some(FilePreviewerAction::Show(file_data)) = action.downcast_ref() {
+                self.show(cx, file_data.clone());
             }
         }
 

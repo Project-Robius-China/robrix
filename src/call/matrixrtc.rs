@@ -372,3 +372,91 @@ pub async fn handle_call_member_event_raw(
         }
     }
 }
+
+/// Response from the LiveKit SFU service.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SfuResponse {
+    /// The LiveKit access token (JWT).
+    pub jwt: Option<String>,
+    /// The LiveKit server URL to connect to.
+    pub url: Option<String>,
+    /// Error message if the request failed.
+    pub error: Option<String>,
+}
+
+/// Fetch a LiveKit JWT token from the SFU service.
+///
+/// This makes a request to the LiveKit service URL's `/sfu/get` endpoint
+/// with the required parameters to obtain a JWT for connecting to the LiveKit room.
+///
+/// # Arguments
+/// * `livekit_service_url` - The base URL of the LiveKit service (from well-known)
+/// * `room_id` - The Matrix room ID
+/// * `room_name` - The room name/alias to use in LiveKit
+/// * `openid_token` - The OpenID token from Matrix for authentication
+/// * `device_id` - The device ID of the local user
+pub async fn fetch_livekit_sfu_token(
+    livekit_service_url: &str,
+    room_id: &str,
+    room_name: &str,
+    openid_token: &str,
+    device_id: &str,
+) -> Result<SfuResponse, String> {
+    use serde_json::json;
+
+    // Build the SFU endpoint URL
+    let sfu_url = format!("{}/sfu/get", livekit_service_url.trim_end_matches('/'));
+
+    log!("Fetching LiveKit SFU token from: {}", sfu_url);
+
+    // Build the request body
+    let request_body = json!({
+        "room_id": room_id,
+        "room_name": room_name,
+        "openid_token": openid_token,
+        "device_id": device_id,
+    });
+
+    // Make the request
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&sfu_url)
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send SFU request: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("SFU request failed with status {}: {}", status, body));
+    }
+
+    let sfu_response: SfuResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse SFU response: {}", e))?;
+
+    if let Some(error) = &sfu_response.error {
+        return Err(format!("SFU service error: {}", error));
+    }
+
+    log!("Successfully obtained LiveKit SFU token");
+    Ok(sfu_response)
+}
+
+/// Get an OpenID token from the Matrix client for authentication with external services.
+pub async fn get_openid_token(client: &Client) -> Result<String, String> {
+    // Use the Matrix client to get an OpenID token
+    // This is used to authenticate with the LiveKit service
+    let request = matrix_sdk::ruma::api::client::account::request_openid_token::v3::Request::new(
+        client.user_id().ok_or("No user ID")?.to_owned(),
+    );
+
+    let response = client
+        .send(request)
+        .await
+        .map_err(|e| format!("Failed to get OpenID token: {}", e))?;
+
+    Ok(response.access_token)
+}

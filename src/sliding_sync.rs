@@ -721,6 +721,17 @@ pub enum MatrixRequest {
     },
     /// Fetch the TURN server configuration from the homeserver.
     GetTurnServers,
+    /// Fetch the RTC foci configuration from the homeserver's well-known endpoint.
+    /// This retrieves the LiveKit service URL from `org.matrix.msc4143.rtc_foci`.
+    FetchRtcWellKnown,
+    /// Fetch a LiveKit SFU JWT token for joining a call.
+    FetchLiveKitSfuToken {
+        room_id: OwnedRoomId,
+        /// The room name/alias to use in LiveKit.
+        room_name: String,
+        /// The device ID of the local user.
+        device_id: String,
+    },
     /// Request to search room members in the background.
     /// Used to avoid blocking the UI thread for large rooms.
     SearchRoomMembers {
@@ -1905,7 +1916,14 @@ async fn matrix_worker_task(
                 let _send_attachment_task = Handle::current().spawn(async move {
                     use crate::home::room_screen::TimelineUpdate;
 
-                    log!("Sending attachment {} ({}, {} bytes) to room {}", file_name, mime_type, data.len(), room_id);
+                    let data_len = data.len() as u64;
+                    log!("Sending attachment {} ({}, {} bytes) to room {}", file_name, mime_type, data_len, room_id);
+
+                    // Send initial progress update (0%)
+                    if let Some(ref sender) = timeline_update_sender {
+                        let _ = sender.send(TimelineUpdate::FileUploadProgress { current: 0, total: data_len });
+                        SignalToUI::set_ui_signal();
+                    }
 
                     // Parse the MIME type
                     let content_type: mime::Mime = mime_type.parse().unwrap_or(mime::APPLICATION_OCTET_STREAM);
@@ -1917,6 +1935,11 @@ async fn matrix_worker_task(
                     match room.send_attachment(&file_name, &content_type, data, config).await {
                         Ok(_response) => {
                             log!("Successfully sent attachment {} to room {}", file_name, room_id);
+                            // Send completion progress update (100%)
+                            if let Some(ref sender) = timeline_update_sender {
+                                let _ = sender.send(TimelineUpdate::FileUploadProgress { current: data_len, total: data_len });
+                                SignalToUI::set_ui_signal();
+                            }
                             enqueue_popup_notification(
                                 format!("Sent: {}", file_name),
                                 PopupKind::Info,
@@ -2252,8 +2275,17 @@ async fn matrix_worker_task(
             MatrixRequest::JoinCall { room_id } => {
                 log!("JoinCall request received for room {}", room_id);
                 let Some(client) = get_client() else { continue };
-                let manager = crate::call::webrtc_manager::webrtc_manager();
 
+                // Check if LiveKit service URL is available
+                let Some(livekit_service_url) = get_livekit_service_url() else {
+                    error!("JoinCall: No LiveKit service URL available. Call joining requires LiveKit.");
+                    Cx::post_action(crate::call::call_state::CallAction::MediaError {
+                        error: "LiveKit service not configured for this homeserver".to_string(),
+                    });
+                    continue;
+                };
+
+                let room_id_clone = room_id.clone();
                 let _task = Handle::current().spawn(async move {
                     let Some(user_id) = client.user_id().map(|u| u.to_owned()) else {
                         error!("JoinCall: user_id not available");
@@ -2263,25 +2295,124 @@ async fn matrix_worker_task(
                         error!("JoinCall: device_id not available");
                         return;
                     };
-                    let config = crate::call::webrtc_session::WebRTCSessionConfig::default();
 
-                    // Join with empty existing memberships for now
-                    // In a full implementation, we would fetch existing memberships from the room state
-                    match manager.join_call(room_id.clone(), user_id.clone(), device_id, Vec::new(), config).await {
-                        Ok(membership) => {
-                            let member_event = crate::call::matrixrtc::MatrixRTCMemberEvent::with_membership(membership);
-                            if let Ok(content) = serde_json::to_value(&member_event) {
-                                if let Some(room) = client.get_room(&room_id) {
-                                    let _ = room.send_state_event_raw(
-                                        crate::call::matrixrtc::MATRIXRTC_MEMBER_EVENT_TYPE,
-                                        user_id.as_str(),
-                                        content,
-                                    ).await;
+                    // Step 1: Get OpenID token for authentication with LiveKit service
+                    log!("JoinCall: Step 1 - Getting OpenID token");
+                    let openid_token = match crate::call::matrixrtc::get_openid_token(&client).await {
+                        Ok(token) => {
+                            log!("JoinCall: OpenID token obtained successfully");
+                            token
+                        }
+                        Err(e) => {
+                            error!("JoinCall: Failed to get OpenID token: {}", e);
+                            Cx::post_action(crate::call::call_state::CallAction::MediaError {
+                                error: format!("Failed to authenticate: {}", e),
+                            });
+                            SignalToUI::set_ui_signal();
+                            return;
+                        }
+                    };
+
+                    // Step 2: Fetch SFU token from LiveKit service
+                    log!("JoinCall: Step 2 - Fetching SFU token from {}", livekit_service_url);
+                    let room_name = room_id_clone.as_str().to_string();
+                    let sfu_response = match crate::call::matrixrtc::fetch_livekit_sfu_token(
+                        &livekit_service_url,
+                        room_id_clone.as_str(),
+                        &room_name,
+                        &openid_token,
+                        device_id.as_str(),
+                    ).await {
+                        Ok(response) => {
+                            log!("JoinCall: SFU token received successfully");
+                            response
+                        }
+                        Err(e) => {
+                            error!("JoinCall: Failed to get SFU token: {}", e);
+                            Cx::post_action(crate::call::call_state::CallAction::MediaError {
+                                error: format!("Failed to get call token: {}", e),
+                            });
+                            SignalToUI::set_ui_signal();
+                            return;
+                        }
+                    };
+
+                    let (jwt, livekit_url) = match (sfu_response.jwt, sfu_response.url) {
+                        (Some(jwt), Some(url)) => (jwt, url),
+                        _ => {
+                            error!("JoinCall: SFU response missing jwt or url");
+                            Cx::post_action(crate::call::call_state::CallAction::MediaError {
+                                error: "Invalid response from call service".to_string(),
+                            });
+                            SignalToUI::set_ui_signal();
+                            return;
+                        }
+                    };
+
+                    // Step 3: Send call membership state event to the room
+                    log!("JoinCall: Step 3 - Sending call membership state event");
+                    let call_id = crate::call::matrixrtc::generate_call_id();
+                    let start_time_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+
+                    let mut membership = crate::call::matrixrtc::MatrixRTCMembership::new(
+                        device_id.clone(),
+                        call_id,
+                    ).with_created_ts(start_time_ms)
+                     .with_focus_active(crate::call::matrixrtc::FocusActive::livekit());
+
+                    // Add the LiveKit focus info
+                    membership.add_preferred_focus(
+                        crate::call::matrixrtc::FocusInfo::livekit(livekit_service_url.clone(), None)
+                    );
+
+                    let member_event = crate::call::matrixrtc::MatrixRTCMemberEvent::with_membership(membership);
+                    if let Ok(content) = serde_json::to_value(&member_event) {
+                        if let Some(room) = client.get_room(&room_id_clone) {
+                            match room.send_state_event_raw(
+                                crate::call::matrixrtc::MATRIXRTC_MEMBER_EVENT_TYPE,
+                                user_id.as_str(),
+                                content,
+                            ).await {
+                                Ok(_) => log!("JoinCall: Membership state event sent successfully"),
+                                Err(e) => {
+                                    error!("JoinCall: Failed to send membership event: {}", e);
+                                    Cx::post_action(crate::call::call_state::CallAction::MediaError {
+                                        error: format!("Failed to join room call: {}", e),
+                                    });
+                                    SignalToUI::set_ui_signal();
+                                    return;
                                 }
                             }
                         }
-                        Err(e) => error!("Failed to join call: {}", e),
                     }
+
+                    // Step 4: Post action with LiveKit token to connect
+                    log!("JoinCall: Step 4 - Posting LiveKitTokenReceived action");
+                    Cx::post_action(crate::call::call_state::CallAction::LiveKitTokenReceived {
+                        room_id: room_id_clone.clone(),
+                        jwt,
+                        livekit_url,
+                    });
+
+                    // Update call state to connected
+                    let local_participant = crate::call::call_state::CallParticipant::new(
+                        user_id.clone(),
+                        device_id.clone(),
+                    );
+                    Cx::post_action(crate::call::call_state::CallAction::StateChanged {
+                        room_id: room_id_clone.clone(),
+                        new_state: crate::call::call_state::CallState::Connected {
+                            room_id: room_id_clone,
+                            participants: Vec::new(),
+                            local_participant,
+                            is_video_call: true,
+                            start_time_ms,
+                        },
+                    });
+                    SignalToUI::set_ui_signal();
                 });
             }
             MatrixRequest::LeaveCall { room_id } => {
@@ -2355,11 +2486,149 @@ async fn matrix_worker_task(
                 // TURN server configuration is typically handled by the WebRTC session setup
                 // For now, we use the default STUN servers in WebRTCSessionConfig
             }
+            MatrixRequest::FetchRtcWellKnown => {
+                log!("FetchRtcWellKnown request received");
+                let Some(client) = get_client() else {
+                    error!("FetchRtcWellKnown: No client available");
+                    continue;
+                };
+
+                let homeserver = client.homeserver();
+                let well_known_url = match homeserver.join("/.well-known/matrix/client") {
+                    Ok(url) => url,
+                    Err(e) => {
+                        error!("FetchRtcWellKnown: Failed to build well-known URL: {}", e);
+                        continue;
+                    }
+                };
+
+                let _task = Handle::current().spawn(async move {
+                    match fetch_rtc_well_known(well_known_url).await {
+                        Ok(Some(livekit_url)) => {
+                            log!("FetchRtcWellKnown: Found LiveKit service URL: {}", livekit_url);
+                            set_livekit_service_url(Some(livekit_url));
+                        }
+                        Ok(None) => {
+                            log!("FetchRtcWellKnown: No LiveKit service URL found in well-known");
+                            set_livekit_service_url(None);
+                        }
+                        Err(e) => {
+                            error!("FetchRtcWellKnown: Failed to fetch well-known: {}", e);
+                            set_livekit_service_url(None);
+                        }
+                    }
+                    SignalToUI::set_ui_signal();
+                });
+            }
+            MatrixRequest::FetchLiveKitSfuToken { room_id, room_name, device_id } => {
+                log!("FetchLiveKitSfuToken request for room {}", room_id);
+
+                let Some(client) = get_client() else {
+                    error!("FetchLiveKitSfuToken: No client available");
+                    Cx::post_action(crate::call::call_state::CallAction::MediaError {
+                        error: "Not logged in".to_string(),
+                    });
+                    continue;
+                };
+
+                let Some(livekit_service_url) = get_livekit_service_url() else {
+                    error!("FetchLiveKitSfuToken: No LiveKit service URL available");
+                    Cx::post_action(crate::call::call_state::CallAction::MediaError {
+                        error: "LiveKit service not configured for this homeserver".to_string(),
+                    });
+                    continue;
+                };
+
+                let room_id_clone = room_id.clone();
+                let _task = Handle::current().spawn(async move {
+                    // First, get an OpenID token for authentication
+                    let openid_token = match crate::call::matrixrtc::get_openid_token(&client).await {
+                        Ok(token) => token,
+                        Err(e) => {
+                            error!("FetchLiveKitSfuToken: Failed to get OpenID token: {}", e);
+                            Cx::post_action(crate::call::call_state::CallAction::MediaError {
+                                error: format!("Failed to get authentication token: {}", e),
+                            });
+                            SignalToUI::set_ui_signal();
+                            return;
+                        }
+                    };
+
+                    // Fetch the SFU token
+                    match crate::call::matrixrtc::fetch_livekit_sfu_token(
+                        &livekit_service_url,
+                        room_id_clone.as_str(),
+                        &room_name,
+                        &openid_token,
+                        &device_id,
+                    ).await {
+                        Ok(sfu_response) => {
+                            if let (Some(jwt), Some(url)) = (sfu_response.jwt, sfu_response.url) {
+                                log!("FetchLiveKitSfuToken: Successfully obtained JWT for LiveKit");
+                                Cx::post_action(crate::call::call_state::CallAction::LiveKitTokenReceived {
+                                    room_id: room_id_clone,
+                                    jwt,
+                                    livekit_url: url,
+                                });
+                            } else {
+                                error!("FetchLiveKitSfuToken: SFU response missing jwt or url");
+                                Cx::post_action(crate::call::call_state::CallAction::MediaError {
+                                    error: "Invalid SFU response".to_string(),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            error!("FetchLiveKitSfuToken: Failed to fetch SFU token: {}", e);
+                            Cx::post_action(crate::call::call_state::CallAction::MediaError {
+                                error: format!("Failed to get call token: {}", e),
+                            });
+                        }
+                    }
+                    SignalToUI::set_ui_signal();
+                });
+            }
         }
     }
 
     error!("matrix_worker_task task ended unexpectedly");
     bail!("matrix_worker_task task ended unexpectedly")
+}
+
+/// Fetches the RTC foci configuration from the homeserver's well-known endpoint.
+/// Returns the LiveKit service URL if found.
+async fn fetch_rtc_well_known(well_known_url: url::Url) -> Result<Option<String>, anyhow::Error> {
+    use serde_json::Value;
+
+    let response = reqwest::get(well_known_url).await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("Well-known request failed with status: {}", response.status());
+    }
+
+    let json: Value = response.json().await?;
+
+    // Look for org.matrix.msc4143.rtc_foci array
+    let rtc_foci = match json.get("org.matrix.msc4143.rtc_foci") {
+        Some(Value::Array(arr)) => arr,
+        _ => {
+            log!("fetch_rtc_well_known: No org.matrix.msc4143.rtc_foci found");
+            return Ok(None);
+        }
+    };
+
+    // Find the livekit entry
+    for focus in rtc_foci {
+        if let Some(focus_type) = focus.get("type").and_then(|t| t.as_str()) {
+            if focus_type == "livekit" {
+                if let Some(url) = focus.get("livekit_service_url").and_then(|u| u.as_str()) {
+                    return Ok(Some(url.to_string()));
+                }
+            }
+        }
+    }
+
+    log!("fetch_rtc_well_known: No livekit entry found in rtc_foci");
+    Ok(None)
 }
 
 
@@ -2543,6 +2812,20 @@ static CLIENT: Mutex<Option<Client>> = Mutex::new(None);
 
 pub fn get_client() -> Option<Client> {
     CLIENT.lock().unwrap().clone()
+}
+
+/// The LiveKit service URL fetched from the homeserver's well-known configuration.
+/// This is used for MatrixRTC calls via LiveKit SFU.
+static LIVEKIT_SERVICE_URL: Mutex<Option<String>> = Mutex::new(None);
+
+/// Returns the LiveKit service URL if it has been fetched from the homeserver.
+pub fn get_livekit_service_url() -> Option<String> {
+    LIVEKIT_SERVICE_URL.lock().unwrap().clone()
+}
+
+/// Sets the LiveKit service URL.
+fn set_livekit_service_url(url: Option<String>) {
+    *LIVEKIT_SERVICE_URL.lock().unwrap() = url;
 }
 
 /// Returns the user ID of the currently logged-in user, if any.
@@ -2863,6 +3146,9 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
 
     // Listen for MatrixRTC call membership events.
     crate::call::matrixrtc::add_matrixrtc_event_handlers(client.clone());
+
+    // Fetch the RTC well-known configuration (LiveKit service URL) from the homeserver.
+    submit_async_request(MatrixRequest::FetchRtcWellKnown);
 
     // Listen for updates to the ignored user list.
     handle_ignore_user_list_subscriber(client.clone());

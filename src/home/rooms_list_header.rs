@@ -7,11 +7,12 @@ use std::mem::discriminant;
 
 use makepad_widgets::*;
 use matrix_sdk_ui::sync_service::State;
+use serde::{Deserialize, Serialize};
 
 use crate::{home::navigation_tab_bar::{NavigationBarAction, SelectedTab}, shared::{image_viewer::{ImageViewerAction, ImageViewerError, LoadState}, popup_list::{PopupKind, enqueue_popup_notification}}};
 
 /// Filter options for the rooms list dropdown.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum RoomFilterOption {
     #[default]
     All,
@@ -21,7 +22,7 @@ pub enum RoomFilterOption {
 }
 
 /// Sort options for the rooms list dropdown.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum RoomSortOption {
     #[default]
     Activity,

@@ -11,10 +11,11 @@ use matrix_sdk::room::RoomMember;
 use ruma::{OwnedRoomId, OwnedUserId};
 
 use crate::{
+    home::invite_modal::InviteModalAction,
     profile::user_profile::{ShowUserProfileAction, UserProfile, UserProfileAndRoomId},
     shared::avatar::{AvatarState, AvatarWidgetRefExt},
     sliding_sync::{submit_async_request, MatrixRequest},
-    utils,
+    utils::{self, RoomNameId},
 };
 
 /// The debounce delay before triggering a background search (in seconds).
@@ -62,6 +63,27 @@ static PENDING_MEMBER_SEARCH_RESULTS: SegQueue<MemberSearchResult> = SegQueue::n
 /// Enqueues a new member search result and signals the UI.
 pub fn enqueue_member_search_result(result: MemberSearchResult) {
     PENDING_MEMBER_SEARCH_RESULTS.push(result);
+    SignalToUI::set_ui_signal();
+}
+
+/// Result of a background member loading operation.
+pub struct MemberLoadResult {
+    /// The room ID these members belong to.
+    pub room_id: OwnedRoomId,
+    /// The room name.
+    pub room_name: String,
+    /// The loaded and converted members.
+    pub members: Arc<Vec<DisplayedMember>>,
+    /// A unique ID to identify this load operation.
+    pub load_id: u64,
+}
+
+/// The queue of member load results waiting to be processed by the UI thread.
+static PENDING_MEMBER_LOAD_RESULTS: SegQueue<MemberLoadResult> = SegQueue::new();
+
+/// Enqueues a new member load result and signals the UI.
+fn enqueue_member_load_result(result: MemberLoadResult) {
+    PENDING_MEMBER_LOAD_RESULTS.push(result);
     SignalToUI::set_ui_signal();
 }
 
@@ -190,18 +212,7 @@ script_mod! {
                         text_style: USERNAME_TEXT_STYLE { font_size: 13 },
                         color: #000
                     }
-                    text: "Members"
-                }
-
-                member_count := Label {
-                    width: Fit,
-                    height: Fit,
-                    margin: Inset{right: 10},
-                    draw_text +: {
-                        text_style: MESSAGE_TEXT_STYLE { font_size: 10 },
-                        color: (MESSAGE_TEXT_COLOR)
-                    }
-                    text: "(0)"
+                    text: "People"
                 }
 
                 close_button := RobrixNeutralIconButton {
@@ -211,6 +222,51 @@ script_mod! {
                     padding: 10,
                     draw_icon.svg: (mod.widgets.ICON_CLOSE)
                     icon_walk: Walk{width: 14, height: 14}
+                }
+            }
+
+            // Invite button
+            invite_container := View {
+                width: Fill,
+                height: Fit,
+                padding: Inset{left: 10, right: 10, top: 5, bottom: 10},
+
+                invite_button := RobrixIconButton {
+                    width: Fill,
+                    height: Fit,
+                    align: Align{x: 0.5, y: 0.5}
+                    padding: 10,
+                    draw_icon +: {
+                        svg: (ICON_ADD_USER)
+                        color: (COLOR_TEXT),
+                    }
+                    icon_walk: Walk{width: 16, height: 16, margin: Inset{right: 6} }
+                    draw_bg +: {
+                        border_size: 1.0
+                        border_color: (COLOR_DIVIDER_DARK),
+                        color: (COLOR_PRIMARY)
+                    }
+                    draw_text +: {
+                        color: (COLOR_TEXT),
+                    }
+                    text: "Invite"
+                }
+            }
+
+            // Member count label
+            member_count_container := View {
+                width: Fill,
+                height: Fit,
+                padding: Inset{left: 15, right: 15, top: 5, bottom: 5},
+
+                member_count := Label {
+                    width: Fit,
+                    height: Fit,
+                    draw_text +: {
+                        text_style: MESSAGE_TEXT_STYLE { font_size: 10 },
+                        color: (MESSAGE_TEXT_COLOR)
+                    }
+                    text: "0 Members"
                 }
             }
 
@@ -347,6 +403,10 @@ pub struct MembersPanel {
     #[rust] next_search_id: u64,
     /// Cache of recent search results (query -> matched indices).
     #[rust] search_cache: HashMap<String, Vec<usize>>,
+    /// Monotonically increasing ID for member load operations.
+    #[rust] next_load_id: u64,
+    /// The current pending load ID, if any.
+    #[rust] pending_load_id: Option<u64>,
 }
 
 impl Widget for MembersPanel {
@@ -379,8 +439,9 @@ impl Widget for MembersPanel {
             }
         }
 
-        // Handle Signal events - process search results from background thread
+        // Handle Signal events - process results from background threads
         if let Event::Signal = event {
+            self.process_member_load_results(cx);
             self.process_search_results(cx);
         }
 
@@ -410,6 +471,17 @@ impl Widget for MembersPanel {
 
         // Handle search input and member selection
         if let Event::Actions(actions) = event {
+            // Handle invite button click
+            if self.button(cx, ids!(invite_button)).clicked(actions) {
+                if let Some(room_id) = &self.room_id {
+                    let room_name_id = RoomNameId::new(
+                        matrix_sdk::RoomDisplayName::Named(self.room_name.clone()),
+                        room_id.clone(),
+                    );
+                    cx.action(InviteModalAction::Open(room_name_id));
+                }
+            }
+
             // Handle search input changes
             let search_input = self.text_input(cx, ids!(search_input));
             if let Some(new_text) = search_input.changed(actions) {
@@ -444,8 +516,6 @@ impl Widget for MembersPanel {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        log!("MembersPanel::draw_walk() - visible={}, slide={}, members={}", self.visible, self.slide, self.filtered_members.len());
-
         // Apply slide animation by adjusting margin
         let slide_offset = (self.slide * 300.0) as f64;
         let margin = Inset {
@@ -458,27 +528,6 @@ impl Widget for MembersPanel {
         script_apply_eval!(cx, main_content, {
             margin: #(margin)
         });
-
-        // Set bg_view visibility based on animation state
-        let bg_visible = self.slide < 1.0;
-        self.view(cx, ids!(bg_view)).set_visible(cx, bg_visible);
-
-        // Update member count label - show "Searching..." when search is in progress
-        let count_text = match &self.search_state {
-            MemberSearchState::Debouncing | MemberSearchState::Searching { .. } => {
-                "Searching...".to_string()
-            }
-            MemberSearchState::Idle => {
-                let count = self.filtered_members.len();
-                let total = self.members.len();
-                if self.search_query.is_empty() {
-                    format!("({})", total)
-                } else {
-                    format!("({}/{})", count, total)
-                }
-            }
-        };
-        self.label(cx, ids!(member_count)).set_text(cx, &count_text);
 
         // Draw the members list
         let displayed_count = self.filtered_members.len();
@@ -530,11 +579,35 @@ impl Widget for MembersPanel {
 }
 
 impl MembersPanel {
+    /// Updates the member count label based on current state.
+    fn update_member_count_label(&mut self, cx: &mut Cx) {
+        let count_text = match &self.search_state {
+            MemberSearchState::Debouncing | MemberSearchState::Searching { .. } => {
+                "Searching...".to_string()
+            }
+            MemberSearchState::Idle => {
+                let count = self.filtered_members.len();
+                let total = self.members.len();
+                if self.search_query.is_empty() {
+                    if total == 1 {
+                        "1 Member".to_string()
+                    } else {
+                        format!("{} Members", total)
+                    }
+                } else {
+                    format!("{}/{} Members", count, total)
+                }
+            }
+        };
+        self.label(cx, ids!(member_count)).set_text(cx, &count_text);
+    }
+
     /// Shows the members panel
     pub fn show(&mut self, cx: &mut Cx) {
         log!("MembersPanel::show() - setting visible=true");
         self.visible = true;
         self.view(cx, ids!(bg_view)).set_visible(cx, true);
+        self.update_member_count_label(cx);
         self.animator_play(cx, ids!(panel.show));
         cx.set_key_focus(self.view.area());
         self.redraw(cx);
@@ -548,25 +621,66 @@ impl MembersPanel {
     }
 
     /// Sets the members to display.
+    /// This spawns a background thread to convert the members to avoid blocking the UI.
     pub fn set_members(&mut self, cx: &mut Cx, members: Arc<Vec<RoomMember>>, room_id: OwnedRoomId, room_name: String) {
         log!("MembersPanel::set_members() - {} members for room {}", members.len(), room_id);
-        self.members = Arc::new(
-            members.iter()
-                .map(DisplayedMember::from_room_member)
-                .collect()
-        );
-        self.room_id = Some(room_id);
-        self.room_name = room_name;
+
+        // Generate a unique load ID for this operation
+        let load_id = self.next_load_id;
+        self.next_load_id = self.next_load_id.wrapping_add(1);
+        self.pending_load_id = Some(load_id);
+
+        // Set the room info immediately
+        self.room_id = Some(room_id.clone());
+        self.room_name = room_name.clone();
         self.search_query.clear();
-        // Clear search state and cache when loading new members
         self.search_state = MemberSearchState::Idle;
         self.search_cache.clear();
         cx.stop_timer(self.debounce_timer);
+
         // Clear the search input
         self.text_input(cx, ids!(search_input)).set_text(cx, "");
-        self.filter_members_sync();
-        log!("MembersPanel::set_members() - filtered to {} members", self.filtered_members.len());
+
+        // Clear current members while loading
+        self.members = Arc::new(Vec::new());
+        self.filtered_members.clear();
+        self.update_member_count_label(cx);
         self.redraw(cx);
+
+        // Spawn background thread to convert members
+        cx.spawn_thread(move || {
+            let displayed_members: Vec<DisplayedMember> = members.iter()
+                .map(DisplayedMember::from_room_member)
+                .collect();
+
+            enqueue_member_load_result(MemberLoadResult {
+                room_id,
+                room_name,
+                members: Arc::new(displayed_members),
+                load_id,
+            });
+        });
+    }
+
+    /// Processes member load results from the background thread queue.
+    fn process_member_load_results(&mut self, cx: &mut Cx) {
+        while let Some(result) = PENDING_MEMBER_LOAD_RESULTS.pop() {
+            // Only process results for the current room and pending load
+            if self.room_id.as_ref() != Some(&result.room_id) {
+                continue;
+            }
+            if self.pending_load_id != Some(result.load_id) {
+                continue;
+            }
+
+            log!("MembersPanel::process_member_load_results() - received {} members", result.members.len());
+            self.members = result.members;
+            self.pending_load_id = None;
+            self.filter_members_sync();
+            self.update_member_count_label(cx);
+            log!("MembersPanel::process_member_load_results() - filtered to {} members", self.filtered_members.len());
+            self.redraw(cx);
+        }
     }
 
     /// Handles changes to the search input text.
@@ -578,6 +692,7 @@ impl MembersPanel {
             cx.stop_timer(self.debounce_timer);
             self.search_state = MemberSearchState::Idle;
             self.filtered_members = (0..self.members.len()).collect();
+            self.update_member_count_label(cx);
             self.redraw(cx);
             return;
         }
@@ -587,6 +702,7 @@ impl MembersPanel {
             cx.stop_timer(self.debounce_timer);
             self.search_state = MemberSearchState::Idle;
             self.filtered_members = cached_indices.clone();
+            self.update_member_count_label(cx);
             self.redraw(cx);
             return;
         }
@@ -596,6 +712,7 @@ impl MembersPanel {
             cx.stop_timer(self.debounce_timer);
             self.search_state = MemberSearchState::Idle;
             self.filter_members_sync();
+            self.update_member_count_label(cx);
             self.redraw(cx);
             return;
         }
@@ -604,6 +721,7 @@ impl MembersPanel {
         cx.stop_timer(self.debounce_timer);
         self.debounce_timer = cx.start_timeout(SEARCH_DEBOUNCE_DELAY);
         self.search_state = MemberSearchState::Debouncing;
+        self.update_member_count_label(cx);
         self.redraw(cx);
     }
 
@@ -629,6 +747,7 @@ impl MembersPanel {
             members: Arc::clone(&self.members),
         });
 
+        self.update_member_count_label(cx);
         self.redraw(cx);
     }
 
@@ -658,6 +777,7 @@ impl MembersPanel {
                     self.search_cache.insert(result.query, result.matched_indices);
 
                     self.search_state = MemberSearchState::Idle;
+                    self.update_member_count_label(cx);
                     needs_redraw = true;
                 }
                 // Ignore stale results (different search_id or query)

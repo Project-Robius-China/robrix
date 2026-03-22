@@ -141,6 +141,28 @@ script_mod! {
                 draw_icon.svg: (ICON_INFO)
                 text: "Unread First"
             }
+
+            divider2 := LineH {
+                margin: Inset{top: 5, bottom: 5}
+                width: Fill,
+            }
+
+            // Section: Actions
+            section_actions := Label {
+                width: Fill,
+                height: Fit,
+                padding: Inset{left: 10, top: 3, bottom: 3}
+                text: "Actions"
+                draw_text +: {
+                    color: #888
+                    text_style: TEXT_SUB {}
+                }
+            }
+
+            mark_all_read_button := mod.widgets.RoomsHeaderDropdownButton {
+                draw_icon.svg: (ICON_CHECKMARK)
+                text: "Mark all as read"
+            }
         }
     }
 }
@@ -152,11 +174,16 @@ pub struct RoomsListHeaderDropdownState {
     pub sort: RoomSortOption,
 }
 
+/// The number of focusable menu items (4 filter + 3 sort + 1 action).
+const MENU_ITEM_COUNT: usize = 8;
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct RoomsListHeaderDropdown {
     #[deref] view: View,
     #[source] source: ScriptObjectRef,
     #[rust] state: Option<RoomsListHeaderDropdownState>,
+    /// Index of the currently focused menu item for keyboard navigation.
+    #[rust] focused_index: usize,
 }
 
 impl Widget for RoomsListHeaderDropdown {
@@ -188,6 +215,31 @@ impl Widget for RoomsListHeaderDropdown {
         if close_menu {
             self.close(cx);
             return;
+        }
+
+        // Handle keyboard navigation
+        if let Event::KeyDown(key_event) = event {
+            match key_event.key_code {
+                KeyCode::ArrowDown => {
+                    self.focused_index = (self.focused_index + 1) % MENU_ITEM_COUNT;
+                    self.redraw(cx);
+                    return;
+                }
+                KeyCode::ArrowUp => {
+                    self.focused_index = if self.focused_index == 0 {
+                        MENU_ITEM_COUNT - 1
+                    } else {
+                        self.focused_index - 1
+                    };
+                    self.redraw(cx);
+                    return;
+                }
+                KeyCode::ReturnKey => {
+                    self.activate_focused_item(cx);
+                    return;
+                }
+                _ => {}
+            }
         }
 
         self.widget_match_event(cx, event, scope);
@@ -226,6 +278,11 @@ impl WidgetMatchEvent for RoomsListHeaderDropdown {
             new_sort = Some(RoomSortOption::Unread);
             close_menu = true;
         }
+        // Action buttons
+        else if self.button(cx, ids!(mark_all_read_button)).clicked(actions) {
+            cx.action(RoomsListHeaderDropdownAction::MarkAllAsRead);
+            close_menu = true;
+        }
 
         if let Some(filter) = new_filter {
             cx.action(RoomsListHeaderAction::SetFilter(filter));
@@ -249,10 +306,47 @@ impl RoomsListHeaderDropdown {
 
     pub fn show(&mut self, cx: &mut Cx, _pos: DVec2, filter: RoomFilterOption, sort: RoomSortOption) {
         self.state = Some(RoomsListHeaderDropdownState { filter, sort });
+        self.focused_index = 0;
         self.reset_button_hovers(cx);
         self.visible = true;
         cx.set_key_focus(self.view.area());
         self.redraw(cx);
+    }
+
+    /// Activates the currently focused menu item.
+    fn activate_focused_item(&mut self, cx: &mut Cx) {
+        let action: Option<Box<dyn std::any::Any>> = match self.focused_index {
+            0 => Some(Box::new(RoomsListHeaderAction::SetFilter(RoomFilterOption::All))),
+            1 => Some(Box::new(RoomsListHeaderAction::SetFilter(RoomFilterOption::Unread))),
+            2 => Some(Box::new(RoomsListHeaderAction::SetFilter(RoomFilterOption::Favorites))),
+            3 => Some(Box::new(RoomsListHeaderAction::SetFilter(RoomFilterOption::People))),
+            4 => Some(Box::new(RoomsListHeaderAction::SetSort(RoomSortOption::Activity))),
+            5 => Some(Box::new(RoomsListHeaderAction::SetSort(RoomSortOption::Alphabetical))),
+            6 => Some(Box::new(RoomsListHeaderAction::SetSort(RoomSortOption::Unread))),
+            7 => {
+                cx.action(RoomsListHeaderDropdownAction::MarkAllAsRead);
+                self.close(cx);
+                return;
+            }
+            _ => None,
+        };
+
+        if let Some(action) = action {
+            if let Some(filter) = action.downcast_ref::<RoomsListHeaderAction>() {
+                match filter {
+                    RoomsListHeaderAction::SetFilter(f) => {
+                        cx.action(RoomsListHeaderAction::SetFilter(*f));
+                        cx.action(RoomsListHeaderDropdownAction::FilterChanged(*f));
+                    }
+                    RoomsListHeaderAction::SetSort(s) => {
+                        cx.action(RoomsListHeaderAction::SetSort(*s));
+                        cx.action(RoomsListHeaderDropdownAction::SortChanged(*s));
+                    }
+                    _ => {}
+                }
+            }
+            self.close(cx);
+        }
     }
 
     fn reset_button_hovers(&mut self, cx: &mut Cx) {
@@ -266,6 +360,9 @@ impl RoomsListHeaderDropdown {
         self.button(cx, ids!(sort_activity_button)).reset_hover(cx);
         self.button(cx, ids!(sort_alphabetical_button)).reset_hover(cx);
         self.button(cx, ids!(sort_unread_button)).reset_hover(cx);
+
+        // Reset action button hovers
+        self.button(cx, ids!(mark_all_read_button)).reset_hover(cx);
     }
 
     fn close(&mut self, cx: &mut Cx) {
@@ -293,4 +390,5 @@ impl RoomsListHeaderDropdownRef {
 pub enum RoomsListHeaderDropdownAction {
     FilterChanged(RoomFilterOption),
     SortChanged(RoomSortOption),
+    MarkAllAsRead,
 }

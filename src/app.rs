@@ -20,9 +20,8 @@ use crate::{
     avatar_cache::clear_avatar_cache,
     call::call_state::CallAction,
     call::call_controls::CallControlsAction,
-    call::call_screen::CallScreenWidgetRefExt,
     home::{
-        event_source_modal::{EventSourceModalAction, EventSourceModalWidgetRefExt}, invite_modal::{InviteModalAction, InviteModalWidgetRefExt}, main_desktop_ui::MainDesktopUiAction, navigation_tab_bar::{NavigationBarAction, SelectedTab}, new_message_context_menu::NewMessageContextMenuWidgetRefExt, room_context_menu::RoomContextMenuWidgetRefExt, space_context_menu::{SpaceContextMenuDetails, SpaceContextMenuWidgetRefExt}, spaces_bar::SpacesBarAction, room_screen::{InviteAction, MessageAction, clear_timeline_states}, rooms_list::{RoomsListAction, RoomsListRef, RoomsListUpdate, RoomsListWidgetRefExt, clear_all_invited_rooms, enqueue_rooms_list_update}, rooms_list_header::RoomsListHeaderAction, rooms_list_header_dropdown::RoomsListHeaderDropdownWidgetRefExt
+        event_source_modal::{EventSourceModalAction, EventSourceModalWidgetRefExt}, invite_modal::{InviteModalAction, InviteModalWidgetRefExt}, main_desktop_ui::MainDesktopUiAction, navigation_tab_bar::{NavigationBarAction, SelectedTab}, new_message_context_menu::NewMessageContextMenuWidgetRefExt, room_context_menu::RoomContextMenuWidgetRefExt, space_context_menu::{SpaceContextMenuDetails, SpaceContextMenuWidgetRefExt}, spaces_bar::SpacesBarAction, room_screen::{InviteAction, MessageAction, clear_timeline_states}, rooms_list::{RoomsListAction, RoomsListRef, RoomsListUpdate, RoomsListWidgetRefExt, clear_all_invited_rooms, enqueue_rooms_list_update}, rooms_list_header::{RoomFilterOption, RoomSortOption, RoomsListHeaderAction}, rooms_list_header_dropdown::{RoomsListHeaderDropdownAction, RoomsListHeaderDropdownWidgetRefExt}
     }, join_leave_room_modal::{
         JoinLeaveModalKind, JoinLeaveRoomModalAction, JoinLeaveRoomModalWidgetRefExt
     }, login::login_screen::LoginAction, logout::logout_confirm_modal::{LogoutAction, LogoutConfirmModalAction, LogoutConfirmModalWidgetRefExt}, persistence, profile::user_profile_cache::clear_user_profile_cache, room::BasicRoomDetails, shared::{confirmation_modal::{ConfirmationModalContent, ConfirmationModalWidgetRefExt}, file_upload_modal::FilePreviewerAction, image_viewer::{ImageViewerAction, ImageViewerWidgetRefExt, LoadState}, popup_list::{PopupKind, enqueue_popup_notification}}, sliding_sync::{AccountSwitchAction, DirectMessageRoomAction, MatrixRequest, current_user_id, get_sync_service, submit_async_request}, utils::RoomNameId, verification::VerificationAction, verification_modal::{
@@ -157,17 +156,6 @@ script_mod! {
                             content +: {
                                 delete_confirmation_modal_inner := NegativeConfirmationModal { }
                             }
-                        }
-
-                        // Call overlay - shown fullscreen during active calls
-                        call_overlay := SolidView {
-                            visible: false,
-                            width: Fill, height: Fill,
-                            show_bg: true,
-                            draw_bg +: {
-                                color: #e8e8e8
-                            }
-                            call_screen := CallScreen {}
                         }
 
                         PopupList {}
@@ -758,6 +746,9 @@ impl MatchEvent for App {
                     self.app_state = app_state.clone();
                     self.app_state.logged_in = logged_in_actual;
                     cx.action(MainDesktopUiAction::LoadDockFromAppState);
+                    // Restore filter and sort preferences
+                    cx.action(RoomsListHeaderAction::SetFilter(self.app_state.room_filter));
+                    cx.action(RoomsListHeaderAction::SetSort(self.app_state.room_sort));
                     continue;
                 }
                 Some(AppStateAction::NavigateToRoom { room_to_close, destination_room }) => {
@@ -774,6 +765,19 @@ impl MatchEvent for App {
                     if let Some((dest_room, room_to_close)) = self.waiting_to_navigate_to_room.take() {
                         self.navigate_to_room(cx, room_to_close.as_ref(), &dest_room);
                     }
+                    continue;
+                }
+                _ => {}
+            }
+
+            // Handle filter/sort changes from the header dropdown to persist preferences.
+            match action.downcast_ref() {
+                Some(RoomsListHeaderDropdownAction::FilterChanged(filter)) => {
+                    self.app_state.room_filter = *filter;
+                    continue;
+                }
+                Some(RoomsListHeaderDropdownAction::SortChanged(sort)) => {
+                    self.app_state.room_sort = *sort;
                     continue;
                 }
                 _ => {}
@@ -955,47 +959,8 @@ impl MatchEvent for App {
                 _ => {}
             }
 
-            // Handle call-related actions
+            // Handle call-related actions (only notifications at app level - overlay handled by MainDesktopUI)
             match action.downcast_ref() {
-                Some(CallAction::StateChanged { room_id: _, new_state }) => {
-                    // Update UI based on call state changes
-                    match new_state {
-                        crate::call::call_state::CallState::Connected { .. } => {
-                            // Show call overlay
-                            self.ui.view(cx, ids!(call_overlay)).set_visible(cx, true);
-                            self.ui.call_screen(cx, ids!(call_screen))
-                                .start_call_timer(cx);
-                        }
-                        crate::call::call_state::CallState::Idle
-                        | crate::call::call_state::CallState::Ended { .. } => {
-                            // Hide call overlay
-                            self.ui.view(cx, ids!(call_overlay)).set_visible(cx, false);
-                            self.ui.call_screen(cx, ids!(call_screen))
-                                .stop_call_timer();
-                        }
-                        _ => {}
-                    }
-                    self.ui.redraw(cx);
-                    continue;
-                }
-                Some(CallAction::ShowCallScreen { room_id, user_display_name }) => {
-                    // Show the call overlay immediately when joining
-                    self.ui.view(cx, ids!(call_overlay)).set_visible(cx, true);
-                    self.ui.call_screen(cx, ids!(call_screen))
-                        .set_room(cx, room_id.clone(), user_display_name.as_deref().unwrap_or(""));
-                    self.ui.call_screen(cx, ids!(call_screen))
-                        .start_call_timer(cx);
-                    self.ui.redraw(cx);
-                    continue;
-                }
-                Some(CallAction::HideCallScreen) => {
-                    // Hide the call overlay
-                    self.ui.view(cx, ids!(call_overlay)).set_visible(cx, false);
-                    self.ui.call_screen(cx, ids!(call_screen))
-                        .stop_call_timer();
-                    self.ui.redraw(cx);
-                    continue;
-                }
                 Some(CallAction::IncomingCall { room_id: _, caller, is_video_call }) => {
                     // Show incoming call notification
                     let call_type = if *is_video_call { "video" } else { "audio" };
@@ -1345,6 +1310,12 @@ pub struct AppState {
     /// This is transient state and not persisted.
     #[serde(skip)]
     pub adding_account: bool,
+    /// The user's preferred room filter option.
+    #[serde(default)]
+    pub room_filter: RoomFilterOption,
+    /// The user's preferred room sort option.
+    #[serde(default)]
+    pub room_sort: RoomSortOption,
 }
 
 /// A snapshot of the main dock: all state needed to restore the dock tabs/layout.

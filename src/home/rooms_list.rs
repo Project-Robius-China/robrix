@@ -1381,6 +1381,18 @@ impl Widget for RoomsList {
                     self.update_displayed_rooms(cx, true);
                     continue;
                 }
+                if let Some(RoomsListHeaderDropdownAction::MarkAllAsRead) = action.downcast_ref() {
+                    // Mark all rooms with unread messages as read
+                    for room in self.all_joined_rooms.values() {
+                        if room.num_unread_messages > 0 || room.is_marked_unread {
+                            submit_async_request(MatrixRequest::SetUnreadFlag {
+                                room_id: room.room_id().to_owned(),
+                                mark_as_unread: false,
+                            });
+                        }
+                    }
+                    continue;
+                }
 
                 // Handle a space navigation tab being selected or de-selected.
                 if let Some(NavigationBarAction::TabSelected(tab)) = action.downcast_ref() {

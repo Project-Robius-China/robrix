@@ -215,4 +215,12 @@ pub enum CallAction {
         caller: CallParticipant,
         is_video_call: bool,
     },
+    /// LiveKit JWT token received from the SFU service.
+    LiveKitTokenReceived {
+        room_id: OwnedRoomId,
+        /// The JWT token for connecting to LiveKit.
+        jwt: String,
+        /// The LiveKit server URL to connect to.
+        livekit_url: String,
+    },
 }
